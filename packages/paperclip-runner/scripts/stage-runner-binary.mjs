@@ -28,9 +28,12 @@ export async function stageRunnerBinary(source, destination) {
   }
 }
 
-export async function stageBuiltRunnerBinary(packageRoot) {
+export async function stageBuiltRunnerBinary(packageRoot, env = process.env) {
   const executable = process.platform === "win32" ? "paperclip-runnerd.exe" : "paperclip-runnerd";
-  const source = path.join(packageRoot, "runner", "target", "release", executable);
+  const targetRoot = env.CARGO_TARGET_DIR
+    ? path.resolve(env.CARGO_TARGET_DIR)
+    : path.join(packageRoot, "runner", "target");
+  const source = path.join(targetRoot, "release", executable);
   const binaryRoot = path.join(packageRoot, "dist", "bin");
   await stageRunnerBinary(source, path.join(binaryRoot, executable));
 }

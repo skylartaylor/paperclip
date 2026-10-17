@@ -231,3 +231,18 @@ test("failed preparation preserves the published bytes and mode", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+
+test("stages the binary from an allocated Cargo target directory", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "runnerd-allocated-target-"));
+  try {
+    const packageRoot = path.join(root, "package");
+    const allocated = path.join(root, "allocated-target");
+    await mkdir(path.join(allocated, "release"), { recursive: true });
+    await copyFile("/bin/echo", path.join(allocated, "release", "paperclip-runnerd"));
+    await stageBuiltRunnerBinary(packageRoot, { CARGO_TARGET_DIR: allocated });
+    assert.equal(execFileSync(path.join(packageRoot, "dist", "bin", "paperclip-runnerd"), ["allocated"], { encoding: "utf8" }).trim(), "allocated");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
