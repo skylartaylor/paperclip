@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "upstream_repository": "https://github.com/paperclipai/paperclip",
+  "upstream_commit": "27ab902d3db2770ada79c9f42a9c06e1d346f34b",
+  "patches": [
+    {
+      "pr": 16634,
+      "url": "https://github.com/paperclipai/paperclip/pull/16634",
+      "head": "45ecbb23c86dd2688edec601b35b26a5c294a715",
+      "base": "5555817c2b18a1a5ebc3a3b01883c1b12b86df5a",
+      "rationale": "Release parked wakes after verified never-dispatched stale cancellation, preserving deferred dispatch under the agent lock."
+    },
+    {
+      "pr": 16636,
+      "url": "https://github.com/paperclipai/paperclip/pull/16636",
+      "head": "52bc555f23494536d86ddc7417a7146836fb4ecc",
+      "base": "5555817c2b18a1a5ebc3a3b01883c1b12b86df5a",
+      "rationale": "Use request-local run context for stdio MCP writes and require signed run credentials for watchdog mutation scope."
+    },
+    {
+      "pr": 16650,
+      "url": "https://github.com/paperclipai/paperclip/pull/16650",
+      "head": "9af98b1f45d5110ed911a8495dc66f6e933f04d0",
+      "base": "2723168083ad9a460f35199357d5d4c5d53f02d6",
+      "rationale": "Isolate failing scheduler steps and bound optional routine metrics; preserve current upstream routine status reconciliation."
+    }
+  ],
+  "held_candidates": {
+    "16613": "Upstream regression passed on unchanged macOS baseline; SSH export is outside initial local-agent topology.",
+    "16632": "Changes timer task-selection policy; needs contention and candidate-limit qualification.",
+    "16607": "SSH in-place realization is outside initial local execution topology and needs paired provider qualification.",
+    "4008": "Handoff identity mismatch: actual PR changes wake markdown image normalization.",
+    "3601": "Old mobile-native auth/schema change; use current responsive web UI first."
+  },
+  "local_patches": [
+    {
+      "reason": "Respect allocator-owned CARGO_TARGET_DIR when staging native runner binaries.",
+      "commit": "3871daeaa6816facadf7fcb998b654a33d8b40b9"
+    }
+  ]
+}
