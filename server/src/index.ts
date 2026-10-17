@@ -8,6 +8,11 @@ import {
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { DELIVERY_QUEUES } from "./services/delivery-work-notifications.js";
 import { registerScheduledWork } from "./services/scheduled-work.js";
+import {
+  createHeartbeatSchedulerWorkTracker,
+  runHeartbeatSchedulerSteps,
+  type HeartbeatSchedulerStep,
+} from "./services/heartbeat/scheduler-steps.js";
 import type { createDeliveryWorkCoordinator } from "./services/delivery-work-coordinator.js";
 import { registerTerminalWorkspaceWork, TERMINAL_WORKSPACE_RETRY_MS } from "./services/terminal-workspace-work.js";
 import { isIdleTaskDrainActive, beginIdleTrackedWork, trackIdleWork } from "./services/task-admission.js";
@@ -1176,23 +1181,16 @@ async function startServerWithDatabaseTeardown(
   }>) | null = null;
   let heartbeatSchedulerStopped = false;
   let heartbeatSchedulerInterval: ReturnType<typeof setInterval> | null = null;
-  const heartbeatSchedulerInFlight = new Set<Promise<void>>();
-  const trackHeartbeatSchedulerWork = (work: Promise<unknown>) => {
-    const finishIdleWork = beginIdleTrackedWork();
-    let tracked: Promise<void>;
-    tracked = Promise.resolve(work)
-      .then(() => undefined, () => undefined)
-      .finally(() => {
-        heartbeatSchedulerInFlight.delete(tracked);
-        finishIdleWork();
-      });
-    heartbeatSchedulerInFlight.add(tracked);
-  };
-  const waitForHeartbeatSchedulerIdle = async () => {
-    while (heartbeatSchedulerInFlight.size > 0) {
-      await Promise.allSettled([...heartbeatSchedulerInFlight]);
-    }
-  };
+  const heartbeatSchedulerWork = createHeartbeatSchedulerWorkTracker({
+    logger,
+    defaultStep: "heartbeat-scheduler-interval",
+    // Idle-drain accounting stays with the tracker so shutdown and `idleWorkSnapshot` see the same
+    // in-flight set as before.
+    beginIdleWork: beginIdleTrackedWork,
+  });
+  const trackHeartbeatSchedulerWork = (work: unknown, step?: string) =>
+    heartbeatSchedulerWork.track(work, step);
+  const waitForHeartbeatSchedulerIdle = () => heartbeatSchedulerWork.drain();
   const executionControlSweepsInFlight = new Set<string>();
   const executionControlSweeps = [
     ["finalization", () => reconcileAbandonedExecutionControl(db)],
@@ -1748,164 +1746,271 @@ async function startServerWithDatabaseTeardown(
     };
 
     const createHeartbeatSchedulerTick = (scheduled: ReturnType<typeof registerScheduledWork>) => () => {
-      // Track the outer async callback as well as the work it starts. Shutdown
-      // can then wait through an already-running suppression check before it
-      // captures the authoritative set of running heartbeat rows.
-      trackHeartbeatSchedulerWork((async () => {
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-        scheduleRoutineStatusReconcile();
-        trackHeartbeatSchedulerWork(decisionExecutor.sweepExpired().catch((err: unknown) => {
-          logger.error({ err }, "decision expiry sweep failed");
-        }));
-        trackHeartbeatSchedulerWork(runRetentionSweep().catch((err: unknown) => {
-          logger.error({ err }, "decision retention sweep failed");
-        }));
-        const sweptRuntimeStatuses = heartbeat.sweepExpiredRuntimeStatuses();
-        if (sweptRuntimeStatuses > 0) {
-          logger.info(
-            { swept: sweptRuntimeStatuses },
-            "heartbeat runtime-status sweeper cleared expired entries",
-          );
-        }
-
-        scheduled.timers.wake();
-
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-        scheduleExternalObjectRefreshSweep(new Date());
-
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-        scheduleMergedPullRequestConfirmationSweep();
-        scheduleGitHubConnectionEventPoll();
-        scheduleGitHubConnectionContinuitySweep();
-        scheduleAdapterLoginReaperSweep();
-        scheduleSetupTokenReaperSweep();
-        scheduleEnvironmentLeaseCleanupSweep();
-
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-        scheduled.routines.wake();
-
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork((async () => {
-          const experimental = await instanceSettingsService(db).getExperimental();
-          if (experimental.enableStatusCards !== true) return;
-          const result = await statusCards.tickDueStatusCards(new Date());
-          await Promise.all(result.enqueued.map(async ({ cardId, generatingIssue }) => {
-            try {
-              await queueIssueAssignmentWakeup({
-                heartbeat,
-                issue: generatingIssue,
-                reason: "status_card_update_assigned",
-                mutation: "status_card.scheduler_update_requested",
-                contextSource: "status_card_scheduler",
-                requestedByActorType: "system",
-                taskKey: `status-card:${cardId}`,
-                rethrowOnError: true,
-              });
-            } catch (err) {
-              await issues.update(generatingIssue.id, { status: "cancelled" });
-              throw err;
+      // The interval body is an ordered list of labelled steps run through
+      // `runHeartbeatSchedulerSteps`. A step that throws is logged once with its own name and the
+      // remaining steps still run, so an unrelated broken sweep can never starve
+      // `scheduled.routines.wake()` — the only driver of the routine scheduler — the way the old
+      // swallowing rejection handler did (the silent routine-scheduler stall). `stopGate` steps keep the original
+      // "idle drain or shutdown aborts the rest of the interval" contract.
+      const steps: HeartbeatSchedulerStep[] = [
+        {
+          name: "routine-status-reconcile",
+          stopGate: true,
+          run: () => scheduleRoutineStatusReconcile(),
+        },
+        {
+          name: "decision-expiry-sweep",
+          stopGate: true,
+          run: () => {
+            trackHeartbeatSchedulerWork(decisionExecutor.sweepExpired().catch((err: unknown) => {
+              logger.error({ err }, "decision expiry sweep failed");
+            }), "decision-expiry-sweep");
+          },
+        },
+        {
+          name: "decision-retention-sweep",
+          run: () => {
+            trackHeartbeatSchedulerWork(runRetentionSweep().catch((err: unknown) => {
+              logger.error({ err }, "decision retention sweep failed");
+            }), "decision-retention-sweep");
+          },
+        },
+        {
+          name: "expired-runtime-status-sweep",
+          run: () => {
+            const sweptRuntimeStatuses = heartbeat.sweepExpiredRuntimeStatuses();
+            if (sweptRuntimeStatuses > 0) {
+              logger.info(
+                { swept: sweptRuntimeStatuses },
+                "heartbeat runtime-status sweeper cleared expired entries",
+              );
             }
-          }));
-          if (result.evaluated > 0 || result.enqueued.length > 0) {
-            logger.info({ evaluated: result.evaluated, enqueued: result.enqueued.length }, "status-card scheduler tick complete");
-          }
-        })().catch((err) => {
-          logger.error({ err }, "status-card scheduler tick failed");
-        }));
-
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(environmentCustomImages
-          .cleanupExpiredSetupSessions()
-          .then((result) => {
-            if (result.timedOut > 0 || result.failed > 0) {
-              logger.warn({ ...result }, "environment customImage setup cleanup changed sessions");
-            }
-          })
-          .catch((err) => {
-            logger.error({ err }, "environment customImage setup cleanup failed");
-          }));
-
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(tools
-          .sweepConnectionHealth()
-          .then((swept) => {
-            if (swept.failed > 0) {
-              logger.warn({ ...swept }, "periodic tool connection health sweep found failing connections");
-            }
-          })
-          .catch((err) => {
-            logger.error({ err }, "periodic tool connection health sweep failed");
-          }));
-
-        trackHeartbeatSchedulerWork(secretProposals.sweepExpired()
-          .then((expired) => {
-            if (expired > 0) logger.warn({ expired }, "periodic secret proposal expiry scrubbed proposals");
-          })
-          .catch((err) => {
-            logger.error({ err }, "periodic secret proposal expiry sweep failed");
-          }));
-
-        trackHeartbeatSchedulerWork(accountingHeartbeat.reconcileCostAccounting().catch((err) => logger.error({ err }, "Cost accounting recovery failed")));
-
-        trackHeartbeatSchedulerWork(app.locals.toolGateway.sweepActionReviews().catch((err: unknown) => logger.error({ err }, "tool review recovery failed")));
-        trackHeartbeatSchedulerWork(app.locals.toolGateway.cleanupExpiredSessions().catch((err: unknown) => logger.error({ err }, "gateway token cleanup failed")));
-
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-        if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
-          // Periodically reap orphaned runs (5-min staleness threshold) and make sure
-          // persisted queued work is still being driven forward.
-          trackHeartbeatSchedulerWork(heartbeat
-            .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
-            .then(() => heartbeat.promoteDueScheduledRetries())
-            .then(async (promotion) => {
-              await heartbeat.resumeQueuedRuns();
-              const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
-              if (
-                promotion.promoted > 0 ||
-                reconciled.assignmentDispatched > 0 ||
-                reconciled.dispatchRequeued > 0 ||
-                reconciled.continuationRequeued > 0 ||
-                reconciled.successfulRunHandoffEscalated > 0 ||
-                reconciled.successfulRunHandoffRetried > 0 ||
-                reconciled.escalated > 0
-              ) {
-                logger.warn(
-                  { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
-                  "periodic heartbeat recovery changed assigned issue state",
-                );
+          },
+        },
+        {
+          name: "issue-monitor-timer-tick",
+          run: () => {
+            scheduled.timers.wake();
+          },
+        },
+        {
+          name: "external-object-refresh-sweep",
+          stopGate: true,
+          run: () => {
+            scheduleExternalObjectRefreshSweep(new Date());
+          },
+        },
+        {
+          name: "merged-pull-request-confirmation-sweep",
+          stopGate: true,
+          run: () => {
+            scheduleMergedPullRequestConfirmationSweep();
+          },
+        },
+        {
+          name: "github-connection-event-poll",
+          run: () => {
+            scheduleGitHubConnectionEventPoll();
+          },
+        },
+        {
+          name: "github-connection-continuity-sweep",
+          run: () => {
+            scheduleGitHubConnectionContinuitySweep();
+          },
+        },
+        {
+          name: "adapter-login-reaper",
+          run: () => {
+            scheduleAdapterLoginReaperSweep();
+          },
+        },
+        {
+          name: "setup-token-reaper",
+          run: () => {
+            scheduleSetupTokenReaperSweep();
+          },
+        },
+        {
+          name: "environment-lease-cleanup",
+          run: () => {
+            scheduleEnvironmentLeaseCleanupSweep();
+          },
+        },
+        {
+          name: "routine-scheduler-tick",
+          stopGate: true,
+          run: () => {
+            scheduled.routines.wake();
+          },
+        },
+        {
+          name: "status-card-tick",
+          stopGate: true,
+          run: () => {
+            trackHeartbeatSchedulerWork((async () => {
+              const experimental = await instanceSettingsService(db).getExperimental();
+              if (experimental.enableStatusCards !== true) return;
+              const result = await statusCards.tickDueStatusCards(new Date());
+              await Promise.all(result.enqueued.map(async ({ cardId, generatingIssue }) => {
+                try {
+                  await queueIssueAssignmentWakeup({
+                    heartbeat,
+                    issue: generatingIssue,
+                    reason: "status_card_update_assigned",
+                    mutation: "status_card.scheduler_update_requested",
+                    contextSource: "status_card_scheduler",
+                    requestedByActorType: "system",
+                    taskKey: `status-card:${cardId}`,
+                    rethrowOnError: true,
+                  });
+                } catch (err) {
+                  await issues.update(generatingIssue.id, { status: "cancelled" });
+                  throw err;
+                }
+              }));
+              if (result.evaluated > 0 || result.enqueued.length > 0) {
+                logger.info({ evaluated: result.evaluated, enqueued: result.enqueued.length }, "status-card scheduler tick complete");
               }
-            })
-            .then(async () => {
-              const reconciled = await heartbeat.reconcileResolvedDependencyWakes();
-              if (reconciled.healed > 0) {
-                logger.warn({ ...reconciled }, "periodic dependency-wake reconciliation restored task execution paths");
-              }
-            })
-            .then(async () => {
-              const reconciled = await heartbeat.reconcileTaskWatchdogs();
-              if (reconciled.triggered > 0) {
-                logger.warn({ ...reconciled }, "periodic task-watchdog reconciliation triggered watchdog work");
-              }
-            })
-            .then(async () => {
-              const scanned = await heartbeat.scanSilentActiveRuns();
-              if (scanned.created > 0 || scanned.escalated > 0) {
-                logger.warn({ ...scanned }, "periodic active-run output watchdog created review work");
-              }
-            })
-            .then(async () => {
-              const swept = await heartbeat.sweepStaleIssueLocks();
-              if (swept.cleared > 0) {
-                logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
-              }
-            })
-            .catch((err) => {
-              logger.error({ err }, "periodic heartbeat recovery failed");
-            }));
-        }
-      })().catch((err) => {
-        logger.error({ err }, "heartbeat scheduler tick failed");
-      }));
+            })().catch((err) => {
+              logger.error({ err }, "status-card scheduler tick failed");
+            }), "status-card-tick");
+          },
+        },
+        {
+          name: "environment-setup-session-cleanup",
+          stopGate: true,
+          run: () => {
+            trackHeartbeatSchedulerWork(environmentCustomImages
+              .cleanupExpiredSetupSessions()
+              .then((result) => {
+                if (result.timedOut > 0 || result.failed > 0) {
+                  logger.warn({ ...result }, "environment customImage setup cleanup changed sessions");
+                }
+              })
+              .catch((err) => {
+                logger.error({ err }, "environment customImage setup cleanup failed");
+              }), "environment-setup-session-cleanup");
+          },
+        },
+        {
+          name: "tool-connection-health-sweep",
+          stopGate: true,
+          run: () => {
+            trackHeartbeatSchedulerWork(tools
+              .sweepConnectionHealth()
+              .then((swept) => {
+                if (swept.failed > 0) {
+                  logger.warn({ ...swept }, "periodic tool connection health sweep found failing connections");
+                }
+              })
+              .catch((err) => {
+                logger.error({ err }, "periodic tool connection health sweep failed");
+              }), "tool-connection-health-sweep");
+          },
+        },
+        {
+          name: "secret-proposal-expiry-sweep",
+          run: () => {
+            trackHeartbeatSchedulerWork(secretProposals.sweepExpired()
+              .then((expired) => {
+                if (expired > 0) logger.warn({ expired }, "periodic secret proposal expiry scrubbed proposals");
+              })
+              .catch((err) => {
+                logger.error({ err }, "periodic secret proposal expiry sweep failed");
+              }), "secret-proposal-expiry-sweep");
+          },
+        },
+        {
+          name: "cost-accounting-reconciliation",
+          run: () => {
+            trackHeartbeatSchedulerWork(accountingHeartbeat.reconcileCostAccounting().catch((err) => logger.error({ err }, "Cost accounting recovery failed")), "cost-accounting-reconciliation");
+          },
+        },
+        {
+          name: "tool-action-review-sweep",
+          run: () => {
+            trackHeartbeatSchedulerWork(app.locals.toolGateway.sweepActionReviews().catch((err: unknown) => logger.error({ err }, "tool review recovery failed")), "tool-action-review-sweep");
+          },
+        },
+        {
+          name: "gateway-session-cleanup",
+          run: () => {
+            trackHeartbeatSchedulerWork(app.locals.toolGateway.cleanupExpiredSessions().catch((err: unknown) => logger.error({ err }, "gateway token cleanup failed")), "gateway-session-cleanup");
+          },
+        },
+        {
+          name: "periodic-heartbeat-recovery",
+          stopGate: true,
+          // Awaited so shutdown still waits through an already-running suppression check before it
+          // captures the authoritative set of running heartbeat rows.
+          await: true,
+          run: async () => {
+            if ((await heartbeat.resolveSchedulingSuppression()).suppressed) return;
+            // Periodically reap orphaned runs (5-min staleness threshold) and make sure
+            // persisted queued work is still being driven forward.
+            trackHeartbeatSchedulerWork(heartbeat
+              .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
+              .then(() => heartbeat.promoteDueScheduledRetries())
+              .then(async (promotion) => {
+                await heartbeat.resumeQueuedRuns();
+                const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
+                if (
+                  promotion.promoted > 0 ||
+                  reconciled.assignmentDispatched > 0 ||
+                  reconciled.dispatchRequeued > 0 ||
+                  reconciled.continuationRequeued > 0 ||
+                  reconciled.successfulRunHandoffEscalated > 0 ||
+                  reconciled.successfulRunHandoffRetried > 0 ||
+                  reconciled.escalated > 0
+                ) {
+                  logger.warn(
+                    { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
+                    "periodic heartbeat recovery changed assigned issue state",
+                  );
+                }
+              })
+              .then(async () => {
+                const reconciled = await heartbeat.reconcileResolvedDependencyWakes();
+                if (reconciled.healed > 0) {
+                  logger.warn({ ...reconciled }, "periodic dependency-wake reconciliation restored task execution paths");
+                }
+              })
+              .then(async () => {
+                const reconciled = await heartbeat.reconcileTaskWatchdogs();
+                if (reconciled.triggered > 0) {
+                  logger.warn({ ...reconciled }, "periodic task-watchdog reconciliation triggered watchdog work");
+                }
+              })
+              .then(async () => {
+                const scanned = await heartbeat.scanSilentActiveRuns();
+                if (scanned.created > 0 || scanned.escalated > 0) {
+                  logger.warn({ ...scanned }, "periodic active-run output watchdog created review work");
+                }
+              })
+              .then(async () => {
+                const swept = await heartbeat.sweepStaleIssueLocks();
+                if (swept.cleared > 0) {
+                  logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
+                }
+              })
+              .catch((err) => {
+                logger.error({ err }, "periodic heartbeat recovery failed");
+              }), "periodic-heartbeat-recovery");
+          },
+        },
+      ];
+
+      // Tracked, so shutdown still waits through an already-running interval before it captures the
+      // authoritative set of running heartbeat rows.
+      trackHeartbeatSchedulerWork(
+        runHeartbeatSchedulerSteps(steps, {
+          logger,
+          track: trackHeartbeatSchedulerWork,
+          isStopped: () => isIdleTaskDrainActive() || heartbeatSchedulerStopped,
+        }),
+        "heartbeat-scheduler-interval",
+      );
     };
     const startHeartbeatScheduler = () => {
       const scheduled = registerScheduledWork(deliveryWork, db, {

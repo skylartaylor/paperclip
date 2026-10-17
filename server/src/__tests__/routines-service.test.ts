@@ -1,5 +1,6 @@
 import { subscribeDatabaseWork } from "@paperclipai/db";
 import { DELIVERY_QUEUES } from "../services/delivery-work-notifications.js";
+import { logger } from "../middleware/logger.js";
 import { createHmac, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -2963,5 +2964,66 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     const run = await svc.firePublicTrigger(trigger.publicId!, { payload: { source: "test" } });
 
     expect(run).toMatchObject({ source: "webhook", status: "issue_created" });
+  });
+
+  // "The tick ran and nothing was due" must be observable. Before this, a quiet tick logged
+  // nothing, so it was indistinguishable from a tick that never ran.
+  it("records a scheduler heartbeat on a tick with zero due rows", async () => {
+    const { routine, svc } = await seedFixture();
+    const { trigger } = await svc.createTrigger(routine.id, {
+      kind: "schedule",
+      cronExpression: "0 0 * * *",
+      timezone: "UTC",
+    }, {});
+    await db
+      .update(routineTriggers)
+      .set({ nextRunAt: new Date(Date.now() + 60 * 60 * 1000) })
+      .where(eq(routineTriggers.id, trigger.id));
+
+    const infoSpy = vi.spyOn(logger, "info");
+    try {
+      expect(await svc.tickScheduledTriggers(new Date())).toEqual({ triggered: 0 });
+
+      const heartbeats = infoSpy.mock.calls.filter(([, message]) => message === "routine scheduler tick heartbeat");
+      expect(heartbeats).toHaveLength(1);
+      expect(heartbeats[0]?.[0]).toMatchObject({
+        event: "routine_scheduler_tick",
+        due: 0,
+        triggered: 0,
+        armedClaimable: 1,
+        oldestOverdueS: 0,
+      });
+      expect((heartbeats[0]?.[0] as { ticks: number }).ticks).toBeGreaterThan(0);
+      // Process identity is part of the heartbeat: a line from a previous process must not make a
+      // restarted, dead scheduler look alive for one interval.
+      expect(typeof (heartbeats[0]?.[0] as { pid: number }).pid).toBe("number");
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  // "The tick ran and failed" must not look like "the tick never ran" either.
+  it("records a heartbeat with failed=true when the tick throws while dispatching", async () => {
+    const { routine, svc } = await seedFixture();
+    const { trigger } = await svc.createTrigger(routine.id, {
+      kind: "schedule",
+      cronExpression: "0 0 * * *",
+      timezone: "UTC",
+    }, {});
+    // A due row with an unusable timezone makes the dispatch path throw.
+    await db
+      .update(routineTriggers)
+      .set({ nextRunAt: new Date(Date.now() - 60_000), timezone: "Not/AZone" })
+      .where(eq(routineTriggers.id, trigger.id));
+
+    const infoSpy = vi.spyOn(logger, "info");
+    try {
+      await expect(svc.tickScheduledTriggers(new Date())).rejects.toThrow();
+      const heartbeats = infoSpy.mock.calls.filter(([, message]) => message === "routine scheduler tick heartbeat");
+      expect(heartbeats).toHaveLength(1);
+      expect(heartbeats[0]?.[0]).toMatchObject({ due: 1, triggered: 0, failed: true });
+    } finally {
+      infoSpy.mockRestore();
+    }
   });
 });

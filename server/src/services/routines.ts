@@ -1,4 +1,5 @@
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
+import { boundSchedulerWork, createSchedulerSingleFlight } from "./heartbeat/scheduler-steps.js";
 import { verifyAppWebhook } from "./app-webhook.js";
 import crypto from "node:crypto";
 import { verifyFirefliesWebhook } from "./fireflies-webhook.js";
@@ -2154,6 +2155,123 @@ export function routineService(
   }
 
 
+  // ── positive per-tick heartbeat ────────────────────────────────────────────────────────
+  // "The tick ran and nothing was due" and "the tick never ran" used to be indistinguishable
+  // from outside the process: the tick logged only when it triggered something, and the
+  // scheduler interval that calls it could abort before reaching it without logging anything at
+  // all. That is what made the last scheduler stall (44 minutes of a dead routine scheduler) expensive
+  // to diagnose. Every tick now emits one structured heartbeat line, so the tick's age is
+  // observable from the service log even on a quiet tick.
+  let schedulerTickCount = 0;
+  let schedulerTickMetricsWarnedAt = 0;
+  const SCHEDULER_TICK_METRICS_WARN_INTERVAL_MS = 10 * 60 * 1000;
+  // The metrics aggregate is optional decoration on the heartbeat. The tick is the routine queue's
+  // only driver, so it must not wait on a slow aggregate: the delivery-work worker cannot start the
+  // next run until this one returns. Bound it and report the tick without metrics when it is slow.
+  const SCHEDULER_TICK_METRICS_TIMEOUT_MS = 250;
+
+  function warnSchedulerTickMetricsUnavailable(err: unknown, timedOut: boolean) {
+    const nowMs = Date.now();
+    if (nowMs - schedulerTickMetricsWarnedAt < SCHEDULER_TICK_METRICS_WARN_INTERVAL_MS) return;
+    schedulerTickMetricsWarnedAt = nowMs;
+    logger.warn(
+      {
+        event: "routine_scheduler_tick_metrics_failed",
+        error: timedOut
+          ? `metrics query exceeded ${SCHEDULER_TICK_METRICS_TIMEOUT_MS}ms`
+          : err instanceof Error ? err.message : String(err),
+      },
+      "routine scheduler tick metrics unavailable; heartbeat recorded without them",
+    );
+  }
+
+  async function loadSchedulerTickMetrics(): Promise<{ armedClaimable: number; oldestOverdueS: number }> {
+    const rows = await db
+      .select({
+        armedClaimable: sql<number>`count(*)::int`,
+        oldestNextRunAt: sql<Date | null>`min(${routineTriggers.nextRunAt})`,
+      })
+      .from(routineTriggers)
+      .innerJoin(routines, eq(routineTriggers.routineId, routines.id))
+      .where(
+        and(
+          eq(routineTriggers.kind, "schedule"),
+          eq(routineTriggers.enabled, true),
+          eq(routineTriggers.archived, false),
+          eq(routines.status, "active"),
+          isNotNull(routineTriggers.cronExpression),
+          isNotNull(routineTriggers.timezone),
+          isNotNull(routineTriggers.nextRunAt),
+        ),
+      );
+    const row = rows[0];
+    const armedClaimable = Number(row?.armedClaimable ?? 0);
+    const oldestNextRunAt = row?.oldestNextRunAt ?? null;
+    const oldestOverdueS = oldestNextRunAt
+      ? Math.max(0, Math.floor((Date.now() - new Date(oldestNextRunAt).getTime()) / 1000))
+      : 0;
+    return { armedClaimable, oldestOverdueS };
+  }
+
+  // One metrics attempt at a time: ticks that time out share the pending attempt instead of starting
+  // another query while the previous one is still running against the same pool.
+  const schedulerTickMetrics = createSchedulerSingleFlight(loadSchedulerTickMetrics);
+
+  /**
+   * Reads the tick metrics without letting them hold the tick. A slow aggregate resolves as
+   * `timedOut` after `SCHEDULER_TICK_METRICS_TIMEOUT_MS` and the tick continues without the fields;
+   * the pending attempt is shared, so repeated ticks cannot pile up queries.
+   */
+  async function readSchedulerTickMetrics(): Promise<{
+    armedClaimable: number | null;
+    oldestOverdueS: number | null;
+  }> {
+    try {
+      const outcome = await boundSchedulerWork(
+        schedulerTickMetrics.run(),
+        SCHEDULER_TICK_METRICS_TIMEOUT_MS,
+      );
+      if ("timedOut" in outcome) {
+        warnSchedulerTickMetricsUnavailable(null, true);
+        return { armedClaimable: null, oldestOverdueS: null };
+      }
+      return outcome.value;
+    } catch (err) {
+      // Metrics are a convenience: a broken aggregate must never fail the tick that feeds them.
+      warnSchedulerTickMetricsUnavailable(err, false);
+      return { armedClaimable: null, oldestOverdueS: null };
+    }
+  }
+
+  async function recordSchedulerTickHeartbeat(
+    now: Date,
+    dueCount: number,
+    triggeredSoFar: number,
+    outcome: { failed: boolean; failure?: unknown } = { failed: false },
+  ) {
+    schedulerTickCount += 1;
+    const metrics = await readSchedulerTickMetrics();
+    logger.info(
+      {
+        event: "routine_scheduler_tick",
+        // Process identity: after a restart, a line from the previous process would otherwise keep
+        // this heartbeat looking fresh for one interval.
+        pid: process.pid,
+        lastTickAt: now.toISOString(),
+        recordedAt: new Date().toISOString(),
+        ticks: schedulerTickCount,
+        due: dueCount,
+        triggered: triggeredSoFar,
+        failed: outcome.failed,
+        ...(outcome.failed
+          ? { error: outcome.failure instanceof Error ? outcome.failure.message : String(outcome.failure) }
+          : {}),
+        ...metrics,
+      },
+      "routine scheduler tick heartbeat",
+    );
+  }
+
   return {
     evaluateActivityGate,
     get: getRoutineById,
@@ -3286,124 +3404,138 @@ export function routineService(
     },
 
     tickScheduledTriggers: async (now: Date = new Date()) => {
-      const worktreeActivation = isTruthyRuntimeEnvValue(runtimeEnv.PAPERCLIP_IN_WORKTREE)
-        ? await resolveWorktreeRunExecutionActivationState({
-          getExperimental: instanceSettings.getExperimental,
-          runtimeEnv,
-        })
-        : undefined;
-      const due = await db
-        .select({
-          trigger: routineTriggers,
-          routine: routines,
-          projectPausedAt: projects.pausedAt,
-        })
-        .from(routineTriggers)
-        .innerJoin(routines, eq(routineTriggers.routineId, routines.id))
-        .leftJoin(projects, eq(routines.projectId, projects.id))
-        .where(
-          and(
-            eq(routineTriggers.kind, "schedule"),
-            eq(routineTriggers.enabled, true),
-            eq(routineTriggers.archived, false),
-            eq(routines.status, "active"),
-            isNotNull(routineTriggers.nextRunAt),
-            lte(routineTriggers.nextRunAt, now),
-          ),
-        )
-        .orderBy(asc(routineTriggers.nextRunAt), asc(routineTriggers.createdAt));
-
+      // The counters live outside the try so the heartbeat in `finally` can report a tick that threw
+      // while dispatching: "ran and failed" must not look like "never ran" in the heartbeat channel.
+      let dueCount = 0;
       let triggered = 0;
-      for (const row of due) {
-        if (!row.trigger.nextRunAt || !row.trigger.cronExpression || !row.trigger.timezone) continue;
+      let failed = false;
+      let failure: unknown;
+      try {
+        const worktreeActivation = isTruthyRuntimeEnvValue(runtimeEnv.PAPERCLIP_IN_WORKTREE)
+          ? await resolveWorktreeRunExecutionActivationState({
+            getExperimental: instanceSettings.getExperimental,
+            runtimeEnv,
+          })
+          : undefined;
+        const due = await db
+          .select({
+            trigger: routineTriggers,
+            routine: routines,
+            projectPausedAt: projects.pausedAt,
+          })
+          .from(routineTriggers)
+          .innerJoin(routines, eq(routineTriggers.routineId, routines.id))
+          .leftJoin(projects, eq(routines.projectId, projects.id))
+          .where(
+            and(
+              eq(routineTriggers.kind, "schedule"),
+              eq(routineTriggers.enabled, true),
+              eq(routineTriggers.archived, false),
+              eq(routines.status, "active"),
+              isNotNull(routineTriggers.nextRunAt),
+              lte(routineTriggers.nextRunAt, now),
+            ),
+          )
+          .orderBy(asc(routineTriggers.nextRunAt), asc(routineTriggers.createdAt));
+        dueCount = due.length;
 
-        // Suppress scheduled firings while the routine's project is paused. The tick is still
-        // claimed and advanced to the next single cron tick (no backfill), so resume continues
-        // at the next cron boundary instead of replaying missed firings. Routines with no
-        // project are never suppressed here.
-        const projectPaused = !!(row.routine.projectId && row.projectPausedAt);
-        const automaticEligibility = await getAutomaticRoutineDispatchEligibility(row.routine, worktreeActivation);
-        const worktreeSuppressed = !automaticEligibility.eligible;
+          for (const row of due) {
+          if (!row.trigger.nextRunAt || !row.trigger.cronExpression || !row.trigger.timezone) continue;
 
-        let runCount = 1;
-        let claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, now);
+          // Suppress scheduled firings while the routine's project is paused. The tick is still
+          // claimed and advanced to the next single cron tick (no backfill), so resume continues
+          // at the next cron boundary instead of replaying missed firings. Routines with no
+          // project are never suppressed here.
+          const projectPaused = !!(row.routine.projectId && row.projectPausedAt);
+          const automaticEligibility = await getAutomaticRoutineDispatchEligibility(row.routine, worktreeActivation);
+          const worktreeSuppressed = !automaticEligibility.eligible;
 
-        if (!projectPaused && !worktreeSuppressed && row.routine.catchUpPolicy === "enqueue_missed_with_cap") {
-          if (isSubHourlyCronExpression(row.trigger.cronExpression, row.trigger.timezone, now)) {
-            claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, now);
-          } else {
-            let cursor: Date | null = row.trigger.nextRunAt;
-            runCount = 0;
-            while (cursor && cursor <= now && runCount < MAX_CATCH_UP_RUNS) {
-              runCount += 1;
-              claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, cursor);
-              cursor = claimedNextRunAt;
+          let runCount = 1;
+          let claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, now);
+
+          if (!projectPaused && !worktreeSuppressed && row.routine.catchUpPolicy === "enqueue_missed_with_cap") {
+            if (isSubHourlyCronExpression(row.trigger.cronExpression, row.trigger.timezone, now)) {
+              claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, now);
+            } else {
+              let cursor: Date | null = row.trigger.nextRunAt;
+              runCount = 0;
+              while (cursor && cursor <= now && runCount < MAX_CATCH_UP_RUNS) {
+                runCount += 1;
+                claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, cursor);
+                cursor = claimedNextRunAt;
+              }
             }
+          }
+
+          const claimed = await db
+            .update(routineTriggers)
+            .set({
+              nextRunAt: claimedNextRunAt,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(routineTriggers.id, row.trigger.id),
+                eq(routineTriggers.enabled, true),
+                eq(routineTriggers.archived, false),
+                eq(routineTriggers.nextRunAt, row.trigger.nextRunAt),
+              ),
+            )
+            .returning({ id: routineTriggers.id })
+            .then((rows) => rows[0] ?? null);
+          if (!claimed) continue;
+
+          if (projectPaused || worktreeSuppressed) {
+            await recordSuppressedAutomaticRun({
+              routine: row.routine,
+              trigger: row.trigger,
+              source: "schedule",
+              reason: worktreeSuppressed ? "worktree_execution_cutoff" : "paused",
+              nextRunAt: claimedNextRunAt,
+            });
+            continue;
+          }
+
+          const activityGate = row.routine.activityGatePolicy === "require_external_activity"
+            ? await evaluateActivityGate(row.routine, now)
+            : null;
+          if (activityGate && !activityGate.fire) {
+            await recordSuppressedAutomaticRun({
+              routine: row.routine,
+              trigger: row.trigger,
+              source: "schedule",
+              reason: "no_external_activity",
+              nextRunAt: claimedNextRunAt,
+              details: {
+                activityGate: {
+                  verdict: "quiet",
+                  windowStart: activityGate.windowStart?.toISOString() ?? null,
+                  matchedActivityId: null,
+                },
+              },
+            });
+            continue;
+          }
+
+          for (let i = 0; i < runCount; i += 1) {
+            await dispatchRoutineRun({
+              routine: row.routine,
+              trigger: row.trigger,
+              source: "schedule",
+              nextRunAtOverride: claimedNextRunAt,
+            });
+            triggered += 1;
           }
         }
 
-        const claimed = await db
-          .update(routineTriggers)
-          .set({
-            nextRunAt: claimedNextRunAt,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(routineTriggers.id, row.trigger.id),
-              eq(routineTriggers.enabled, true),
-              eq(routineTriggers.archived, false),
-              eq(routineTriggers.nextRunAt, row.trigger.nextRunAt),
-            ),
-          )
-          .returning({ id: routineTriggers.id })
-          .then((rows) => rows[0] ?? null);
-        if (!claimed) continue;
-
-        if (projectPaused || worktreeSuppressed) {
-          await recordSuppressedAutomaticRun({
-            routine: row.routine,
-            trigger: row.trigger,
-            source: "schedule",
-            reason: worktreeSuppressed ? "worktree_execution_cutoff" : "paused",
-            nextRunAt: claimedNextRunAt,
-          });
-          continue;
-        }
-
-        const activityGate = row.routine.activityGatePolicy === "require_external_activity"
-          ? await evaluateActivityGate(row.routine, now)
-          : null;
-        if (activityGate && !activityGate.fire) {
-          await recordSuppressedAutomaticRun({
-            routine: row.routine,
-            trigger: row.trigger,
-            source: "schedule",
-            reason: "no_external_activity",
-            nextRunAt: claimedNextRunAt,
-            details: {
-              activityGate: {
-                verdict: "quiet",
-                windowStart: activityGate.windowStart?.toISOString() ?? null,
-                matchedActivityId: null,
-              },
-            },
-          });
-          continue;
-        }
-
-        for (let i = 0; i < runCount; i += 1) {
-          await dispatchRoutineRun({
-            routine: row.routine,
-            trigger: row.trigger,
-            source: "schedule",
-            nextRunAtOverride: claimedNextRunAt,
-          });
-          triggered += 1;
-        }
+          return { triggered };
+          } catch (err) {
+        failed = true;
+        failure = err;
+        throw err;
+      } finally {
+        await recordSchedulerTickHeartbeat(now, dueCount, triggered, { failed, failure });
       }
-
-      return { triggered };
     },
 
     // Repair a missed issue-status hook through the same status transition as
