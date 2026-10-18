@@ -336,6 +336,10 @@ function buildManagedMcpBlock(input: {
       // This removes only the redundant provider prompt for this fixed facade.
       // Paperclip's authenticated gateway still enforces native human approval.
       'default_tools_approval_mode = "auto"',
+      '[mcp_servers.paperclip_github.tools.prepare_issue_comment]',
+      // Permit reaching the broker's own human-only approval card. This facade
+      // has no approval method and cannot resolve that governed action itself.
+      'approval_mode = "approve"',
     );
   }
   lines.push(MANAGED_MCP_BLOCK_END);

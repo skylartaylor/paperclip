@@ -161,7 +161,7 @@
     {
       "id": "coordinator-github-mcp-bridge",
       "date": "2026-10-18",
-      "reason": "Expose a bounded, run-scoped local GitHub plugin MCP facade; bind comment requests to the authenticated current task before approval instead of a fixed pilot task policy. Preserve native human-only write approvals and avoid connection-setup discovery for installed plugins. Configure the first-party bridge inside the managed Codex home, never through custom CLI config overrides that conflict with managed AI authentication.",
+      "reason": "Expose a bounded, run-scoped local GitHub plugin MCP facade; bind comment requests to the authenticated current task before approval instead of a fixed pilot task policy. Preserve native human-only write approvals and avoid connection-setup discovery for installed plugins. Configure the first-party bridge inside the managed Codex home, never through custom CLI config overrides that conflict with managed AI authentication. Permit only the preparation facade at the provider MCP layer so the native human approval card can be reached; no native approval method is exposed.",
       "files": [
         "scripts/paperclip-github-mcp.py",
         "scripts/tests/test_paperclip_github_mcp.py",

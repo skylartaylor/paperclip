@@ -1044,6 +1044,8 @@ describe("evaluateCodexCredentialReadiness", () => {
       expect(config).toContain('args = ["/fixture/paperclip-github-mcp.py","--coordinator-id","coordinator-fixture"]');
       expect(config).toContain('"PAPERCLIP_RUN_ID", "PAPERCLIP_TASK_ID"');
       expect(config).toContain('default_tools_approval_mode = "auto"');
+      expect(config).toContain('[mcp_servers.paperclip_github.tools.prepare_issue_comment]');
+      expect(config).toContain('approval_mode = "approve"');
       expect(config).toContain('"prepare_issue_comment"');
       expect(config).not.toContain("Bearer");
       expect(config).not.toContain("approval_policy");
