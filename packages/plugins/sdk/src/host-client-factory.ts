@@ -233,6 +233,8 @@ export interface HostServices {
 
   /** Provides issue read/write, relation, checkout, wakeup, summary, comment methods. */
   issues: {
+    listLabels(params: WorkerToHostMethods["issues.listLabels"][0]): Promise<WorkerToHostMethods["issues.listLabels"][1]>;
+    ensureLabel(params: WorkerToHostMethods["issues.ensureLabel"][0]): Promise<WorkerToHostMethods["issues.ensureLabel"][1]>;
     list(params: WorkerToHostMethods["issues.list"][0]): Promise<WorkerToHostMethods["issues.list"][1]>;
     get(params: WorkerToHostMethods["issues.get"][0]): Promise<WorkerToHostMethods["issues.get"][1]>;
     create(params: WorkerToHostMethods["issues.create"][0]): Promise<WorkerToHostMethods["issues.create"][1]>;
@@ -457,6 +459,8 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
     "skills.managed.reset": "skills.managed",
 
   // Issues
+  "issues.listLabels": "issues.read",
+  "issues.ensureLabel": "issues.update",
   "issues.list": "issues.read",
   "issues.get": "issues.read",
   "issues.create": "issues.create",
@@ -884,6 +888,8 @@ export function createHostClientHandlers(
     }),
 
     // Issues
+    "issues.listLabels": gated("issues.listLabels", async (params) => services.issues.listLabels(params)),
+    "issues.ensureLabel": gated("issues.ensureLabel", async (params) => services.issues.ensureLabel(params)),
     "issues.list": gated("issues.list", async (params) => {
       return services.issues.list(params);
     }),

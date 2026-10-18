@@ -1,3 +1,4 @@
+import { createHostClientHandlers } from "../../../packages/plugins/sdk/src/host-client-factory.js";
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -321,4 +322,24 @@ describeEmbeddedPostgres("plugin access and authorization host services", () => 
     expect(JSON.stringify(rows[0]!.details)).not.toContain("should-not-persist");
     services.dispose();
   });
+  it("keeps label ensure idempotent, company-scoped, validated and audited", async () => {
+    const company = await createCompany(db, "PLA");
+    const other = await createCompany(db, "PLB");
+    const services = buildHostServices(db, pluginId, "label-extension", createEventBusStub());
+    const handlers = createHostClientHandlers({pluginId, capabilities: ["issues.read", "issues.update"], services});
+    const context = {invocationScope: {companyId: company.id}} as never;
+    const input = {companyId: company.id, name: "enhancement", color: "#00ff00"};
+    const results = await Promise.all([handlers["issues.ensureLabel"](input, context), handlers["issues.ensureLabel"](input, context)]);
+    expect(results[0].id).toBe(results[1].id);
+    expect(await handlers["issues.listLabels"]({companyId: company.id}, context)).toHaveLength(1);
+    await expect(handlers["issues.ensureLabel"]({...input, companyId: other.id}, context)).rejects.toThrow(/scoped|allowed/);
+    await expect(handlers["issues.listLabels"]({companyId: other.id}, context)).rejects.toThrow(/scoped|allowed/);
+    await expect(handlers["issues.ensureLabel"]({...input, color: "red"}, context)).rejects.toThrow();
+    const readonly = createHostClientHandlers({pluginId, capabilities: ["issues.read"], services});
+    await expect(readonly["issues.ensureLabel"](input, context)).rejects.toThrow(/capabilit/i);
+    const rows = await db.select().from(activityLog);
+    expect(rows.filter(row => row.action === "label.created")).toHaveLength(1);
+    services.dispose();
+  });
+
 });

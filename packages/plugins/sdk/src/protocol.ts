@@ -28,6 +28,7 @@ import type {
   Project,
   Issue,
   IssueComment,
+  IssueLabel,
   IssueDocument,
   IssueDocumentSummary,
   IssueAssigneeAdapterOverrides,
@@ -1871,6 +1872,8 @@ export interface WorkerToHostMethods {
   ];
 
   // Issues
+  "issues.listLabels": [params: {companyId: string}, result: IssueLabel[]];
+  "issues.ensureLabel": [params: {companyId: string; name: string; color: string}, result: IssueLabel];
   "issues.list": [
     params: {
       companyId: string;

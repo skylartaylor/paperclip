@@ -819,6 +819,8 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       },
 
       issues: {
+        async listLabels(companyId) { return callHost("issues.listLabels", {companyId}); },
+        async ensureLabel(input) { return callHost("issues.ensureLabel", input); },
         async list(input) {
           return callHost("issues.list", {
             companyId: input.companyId,

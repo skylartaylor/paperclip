@@ -117,6 +117,10 @@
     {
       "reason": "Parse Claude setup-token terminal columns and wrapped credentials without exact footer or blank-line dependency; wait for complete clean exit. MIT-licensed normalization adapted from michaltakac/paperclip-claude-auth b52843396b511e8bc6ce3d906ba73f5ed111f308.",
       "commit": "7dc0b53a7135b647fd051906deb9abbb46c07a18"
+    },
+    {
+      "reason": "Expose company-scoped, capability-gated native label list/ensure methods to plugins; validate, deduplicate and audit label creation.",
+      "source": "doc/plugin-labels.md"
     }
   ]
 }

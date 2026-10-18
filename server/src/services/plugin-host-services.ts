@@ -3,6 +3,7 @@ import { createAgentLifecycle } from "./agent-lifecycle.js";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
+  labels,
   agentTaskSessions as agentTaskSessionsTable,
   agents as agentsTable,
   budgetIncidents,
@@ -30,7 +31,7 @@ import type {
   PluginExecutionWorkspaceMetadata,
 } from "@paperclipai/plugin-sdk";
 import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, IssueRelationIssueSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
-import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
+import { createIssueLabelSchema, pluginOperationIssueOriginKind } from "@paperclipai/shared";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
@@ -2047,6 +2048,22 @@ export function buildHostServices(
     },
 
     issues: {
+      async listLabels(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return issues.listLabels(companyId);
+      },
+      async ensureLabel(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const {name, color} = createIssueLabelSchema.parse(params);
+        const [created] = await db.insert(labels).values({companyId, name, color})
+          .onConflictDoNothing({target: [labels.companyId, labels.name]}).returning();
+        const label = created ?? (await issues.listLabels(companyId)).find((entry) => entry.name === name);
+        if (!label) throw new Error("Label could not be resolved after creation");
+        if (created) await logPluginActivity({companyId, action: "label.created", entityType: "label", entityId: label.id, details: {name, color: label.color}});
+        return label;
+      },
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);

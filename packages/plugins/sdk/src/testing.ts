@@ -15,6 +15,7 @@ import type {
   RoutineRun,
   Issue,
   IssueComment,
+  IssueLabel,
   IssueThreadInteraction,
   IssueAttachment,
   IssueDocument,
@@ -509,6 +510,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   const routines = new Map<string, Routine>();
   const routineRuns = new Map<string, RoutineRun>();
   const issues = new Map<string, Issue>();
+  const issueLabels = new Map<string, IssueLabel>();
   const blockedByIssueIds = new Map<string, string[]>();
   const issueComments = new Map<string, IssueComment[]>();
   const issueInteractions = new Map<string, IssueThreadInteraction[]>();
@@ -1597,6 +1599,19 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       },
     },
     issues: {
+      async listLabels(companyId) {
+        requireCapability(manifest, capabilitySet, "issues.read");
+        requireCompanyId(companyId);
+        return [...issueLabels.values()].filter(label => label.companyId === companyId);
+      },
+      async ensureLabel(input) {
+        requireCapability(manifest, capabilitySet, "issues.update");
+        const companyId = requireCompanyId(input.companyId);
+        const existing = [...issueLabels.values()].find(label => label.companyId === companyId && label.name === input.name.trim());
+        if (existing) return existing;
+        const label = {id: randomUUID(), companyId, name: input.name.trim(), color: input.color, createdAt: new Date(), updatedAt: new Date()};
+        issueLabels.set(label.id, label);return label;
+      },
       async list(input) {
         requireCapability(manifest, capabilitySet, "issues.read");
         const companyId = requireCompanyId(input?.companyId);

@@ -56,6 +56,8 @@ const OPERATION_CAPABILITIES: Record<string, readonly PluginCapability[]> = {
   "project.workspaces.list": ["project.workspaces.read"],
   "project.workspaces.get": ["project.workspaces.read"],
   "execution.workspaces.get": ["execution.workspaces.read"],
+  "issues.listLabels": ["issues.read"],
+  "issues.ensureLabel": ["issues.update"],
   "issues.list": ["issues.read"],
   "issues.get": ["issues.read"],
   "issues.relations.get": ["issue.relations.read"],

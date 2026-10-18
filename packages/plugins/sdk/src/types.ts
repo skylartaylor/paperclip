@@ -19,6 +19,7 @@ import type {
   Project,
   Issue,
   IssueComment,
+  IssueLabel,
   IssueDocument,
   IssueDocumentSummary,
   IssueRelationIssueSummary,
@@ -1450,6 +1451,10 @@ export interface PluginIssueAttachmentContent {
  * - `issue.documents.write` for `documents.upsert` and `documents.delete`
  */
 export interface PluginIssuesClient {
+  /** Company-scoped label directory; requires issues.read. */
+  listLabels(companyId: string): Promise<IssueLabel[]>;
+  /** Idempotently ensure a label by name; requires issues.update. */
+  ensureLabel(input: {companyId: string; name: string; color: string}): Promise<IssueLabel>;
   list(input: {
     companyId: string;
     projectId?: string;
