@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { and, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { adapterAuthSessions, ADAPTER_AUTH_SESSION_ACTIVE_STATES, environments, type Db } from "@paperclipai/db";
 import type { AiConnectionLoginIntent, LocalAiLoginAttempt, LocalAiLoginStatus } from "@paperclipai/shared";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
@@ -14,6 +14,9 @@ import { startLocalBrowserLogin, type LocalBrowserLoginState } from "./local-ai-
 
 const LOCAL_LOGIN_METHOD = "local_subscription";
 const ATTEMPT_DURATION_MS = 30 * 60 * 1000;
+const TERMINAL_LOCAL_STATES = ["authenticated", "failed", "timed_out", "cancelled"] as const;
+// Keep terminal attempts readable to polling clients for one attempt horizon.
+const TERMINAL_RETENTION_MS = ATTEMPT_DURATION_MS;
 function loginHome(id: string) {
   const root = resolvePaperclipInstanceRoot();
   // macOS exposes /var through a system symlink to /private/var. Credential
@@ -80,6 +83,19 @@ export function localAiLoginService(db: Db) {
         }).where(eq(adapterAuthSessions.id, row.id));
       });
     }
+    // Local homes are already removed before expiresAt becomes null. Only this
+    // reaper owns local rows; the setup-token reaper must leave them alone.
+    const stale = await db.select({ id: adapterAuthSessions.id }).from(adapterAuthSessions)
+      .where(and(eq(adapterAuthSessions.connectionMethod, LOCAL_LOGIN_METHOD),
+        isNull(adapterAuthSessions.expiresAt),
+        isNull(adapterAuthSessions.providerLeaseId),
+        inArray(adapterAuthSessions.status, [...TERMINAL_LOCAL_STATES]),
+        lte(adapterAuthSessions.finishedAt, new Date(Date.now() - TERMINAL_RETENTION_MS))))
+      .orderBy(adapterAuthSessions.finishedAt).limit(100);
+    if (stale.length > 0) {
+      await db.delete(adapterAuthSessions).where(inArray(adapterAuthSessions.id, stale.map(row => row.id)));
+    }
+
   }
 
   async function start(companyId: string, userId: string, intent: AiConnectionLoginIntent, restart = false): Promise<LocalAiLoginAttempt> {
