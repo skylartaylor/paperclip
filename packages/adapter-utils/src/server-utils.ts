@@ -3516,14 +3516,18 @@ export function sanitizeInheritedPaperclipEnv(
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   delete env.PAPERCLIPAI_CMD;
   for (const key of Object.keys(env)) {
-    if (AGENT_IDENTITY_ENV_KEYS.includes(key.toUpperCase())) {
+    const normalizedKey = key.toUpperCase();
+    // Host credentials are never inherited implicitly. Explicit adapter env
+    // remains a separate, user-configured input. Windows names ignore case.
+    if (["DATABASE_URL", "BETTER_AUTH_SECRET", "PAPERCLIPAI_CMD"].includes(normalizedKey)
+      || AGENT_IDENTITY_ENV_KEYS.includes(normalizedKey)) {
       delete env[key];
       continue;
     }
-    if (!key.startsWith("PAPERCLIP_")) continue;
-    if (key === "PAPERCLIP_RUNTIME_API_URL") continue;
-    if (key === "PAPERCLIP_LISTEN_HOST") continue;
-    if (key === "PAPERCLIP_LISTEN_PORT") continue;
+    if (!normalizedKey.startsWith("PAPERCLIP_")) continue;
+    if (normalizedKey === "PAPERCLIP_RUNTIME_API_URL") continue;
+    if (normalizedKey === "PAPERCLIP_LISTEN_HOST") continue;
+    if (normalizedKey === "PAPERCLIP_LISTEN_PORT") continue;
     delete env[key];
   }
   return env;
