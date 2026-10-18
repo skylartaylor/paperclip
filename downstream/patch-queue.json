@@ -132,6 +132,19 @@
     {
       "reason": "Expose company-scoped, capability-gated native label list/ensure methods to plugins; validate, deduplicate and audit label creation.",
       "source": "doc/plugin-labels.md"
+    },
+    {
+      "id": "plugin-mutation-risk-classification",
+      "date": "2026-10-18",
+      "reason": "GitHub add/assign/reply/resolve/request/upload/link mutations were incorrectly labeled read; preserve get_pull_request as read.",
+      "files": [
+        "server/src/services/tool-gateway.ts",
+        "server/src/services/plugin-tool-risk.ts"
+      ],
+      "validation": [
+        "65 focused tests including native write-risk approval/dispatch regression",
+        "server TypeScript compile"
+      ]
     }
   ]
 }

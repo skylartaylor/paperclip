@@ -234,6 +234,31 @@ describeEmbeddedPostgres("tool gateway service", () => {
     await tempDb?.cleanup();
   });
 
+  it("classifies GitHub add_issue_comment as write and gates it before plugin dispatch", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    const dispatcher = fakePluginDispatcher();
+    vi.spyOn(dispatcher, "listToolsForAgent").mockReturnValue([{
+      name: "paperclip-github-plugin:add_issue_comment", displayName: "Add issue comment",
+      description: "Post a comment", parametersSchema: { type: "object" }, pluginId: "fixture-plugin",
+    }]);
+    const dispatch = vi.spyOn(dispatcher, "executeTool");
+    await db.insert(toolPolicies).values({
+      companyId: company.id, name: "Require approval for writes", policyType: "require_approval",
+      selectors: { riskLevel: "write" },
+    });
+    const gateway = createTestToolGatewayService(db, { pluginToolDispatcher: dispatcher });
+    await expect(gateway.executePluginTool({
+      actor: { type: "agent", companyId: company.id, agentId: agent.id, runId: run.id },
+      tool: "paperclip-github-plugin:add_issue_comment", parameters: { body: "Synthetic test only" },
+      runContext: { companyId: company.id, agentId: agent.id, runId: run.id },
+    })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [invocation] = await db.select().from(toolInvocations);
+    expect(invocation).toMatchObject({ riskLevel: "write", policyDecision: "require_approval", status: "awaiting_approval" });
+    expect(dispatch).not.toHaveBeenCalled();
+    const [interaction] = await db.select().from(issueThreadInteractions);
+    expect(interaction.effectiveResolverPolicy).toBe("human_only");
+  });
+
   it("gates write tools with an action request and executes only stored reviewed arguments once", async () => {
     const { company, agent, run } = await createRunFixture(db);
     await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
