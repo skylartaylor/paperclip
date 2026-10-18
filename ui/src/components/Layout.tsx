@@ -23,6 +23,7 @@ import { ToastViewport } from "./ToastViewport";
 import { AnnouncementWell } from "./AnnouncementWell";
 import { PluginAppShellOverlays } from "./PluginAppShellOverlays";
 import { MobileBottomNav } from "./MobileBottomNav";
+import { useKeyboardInset } from "../hooks/useKeyboardInset";
 import { WorktreeBanner } from "./WorktreeBanner";
 import { DevRestartBanner } from "./DevRestartBanner";
 import { StandaloneBrowserControls } from "./StandaloneBrowserControls";
@@ -142,7 +143,11 @@ export function Layout({ sidebarSections }: { sidebarSections?: ReactNode }) {
   const mainContentRef = useRef<HTMLElement | null>(null);
   const scrollMemory = useRef(new NavigationScrollMemory());
   const activeScrollKey = useRef<string>(location.key);
-  const mobileNavVisible = useMobileNavVisibility(isMobile, location.pathname);
+  // iOS reports the software keyboard only through visualViewport, so measure
+  // it and lift the docked composer by hand.
+  const keyboardInset = useKeyboardInset(true);
+  const keyboardOpen = keyboardInset > 0;
+  const mobileNavVisible = useMobileNavVisibility(isMobile, location.pathname, keyboardOpen);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const matchedCompany = useMemo(() => {
     if (!companyPrefix) return null;
@@ -695,13 +700,22 @@ export function Layout({ sidebarSections }: { sidebarSections?: ReactNode }) {
               // (PAP-495): while the auto-hiding mobile nav is on screen, raise
               // it to the nav height so a sticky composer clears the nav; drop
               // it back to the safe-area dock when the nav hides. Desktop leaves
-              // the token at its :root default.
+              // the token at its :root default unless a tablet keyboard is open.
               style={
-                isMobile
+                (isMobile || keyboardOpen)
                   ? ({
-                      "--tc-composer-bottom": mobileNavVisible
-                        ? "var(--tc-composer-visible-nav-offset)"
-                        : "var(--tc-composer-hidden-nav-offset)",
+                      "--tc-composer-bottom": keyboardOpen
+                        ? "calc(var(--sz-keyboard-inset) + var(--spacing) * 2)"
+                        : mobileNavVisible
+                          ? "var(--tc-composer-visible-nav-offset)"
+                          : "var(--tc-composer-hidden-nav-offset)",
+                      // Let the last message scroll clear of the docked composer.
+                      ...(keyboardOpen
+                        ? {
+                            paddingBottom:
+                              "calc(var(--sz-keyboard-inset) + var(--sz-calc-14))",
+                          }
+                        : null),
                       "--mobile-nav-motion-duration": mobileNavVisible
                         ? "var(--motion-mobile-nav-enter)"
                         : "var(--motion-mobile-nav-exit)",
@@ -743,7 +757,9 @@ export function Layout({ sidebarSections }: { sidebarSections?: ReactNode }) {
           </div>
         </div>
       </div>
-      {isMobile && <MobileBottomNav visible={mobileNavVisible} />}
+      {/* The nav is fixed to the layout viewport, so with the keyboard open it
+          would sit behind it. Hide it and give the row to the composer. */}
+      {isMobile && <MobileBottomNav visible={mobileNavVisible && !keyboardOpen} />}
       <CommandPalette />
       <NewIssueDialog />
       <NewProjectDialog />

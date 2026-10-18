@@ -86,6 +86,20 @@
       "head": "e3d3bdc03043f69c6197aa30aa26dcda3f5b3f65",
       "base": "b9750b152fccaba51939fbf2b48e237087626f33",
       "rationale": "Recognize subscription usage reset wording; add isolated non-UTC host timezone regression coverage."
+    },
+    {
+      "pr": 15245,
+      "url": "https://github.com/paperclipai/paperclip/pull/15245",
+      "head": "85a736601790ca9342167ebaa4aad317dceec455",
+      "base": "f858207161ba29c01c82f4674aef83d91b74480f",
+      "rationale": "Measure visual viewport keyboard inset; lift task composers, pause navigation motion during keyboard scroll, and allow wide tablet layouts. Includes synthetic viewport regression coverage; physical iOS acceptance remains required."
+    },
+    {
+      "pr": 14302,
+      "url": "https://github.com/paperclipai/paperclip/pull/14302",
+      "head": "789caf6336139f9e947b34a22653923d651ba38d",
+      "base": "0f14d261233c545aa6a8a38ec253c498a5130fff",
+      "rationale": "Restore mobile task assignee control and desktop popover triggering. Adapted to current preferences; prevent Radix and React search autofocus for mobile/touch tablet interaction."
     }
   ],
   "held_candidates": {
