@@ -30,6 +30,62 @@
       "head": "b1da29402613f60a54b109d12214e57167c099c3",
       "base": "d0f69670db2aba8ddae992594edacc5504e39fbf",
       "rationale": "Recognize the Claude setup-token native-copy hint so browser subscription sign-in exposes its authorization URL."
+    },
+    {
+      "pr": 10467,
+      "url": "https://github.com/paperclipai/paperclip/pull/10467",
+      "head": "8a20e48afda752cb14d1abbdd13b313657022425",
+      "base": "d51f42ed648c4711a5e6bc4c41a6d4ff4e6e187b",
+      "rationale": "Adapt Cloudflare Access assertion and email HTTP redaction only; retain current logger routing and body policy."
+    },
+    {
+      "pr": 12870,
+      "url": "https://github.com/paperclipai/paperclip/pull/12870",
+      "head": "85c8e3904a52f118b511a800ee9e2f7bfd2c183e",
+      "base": "f2349990ccfdaa0fc8ae33754b6695c2bdeb60e1",
+      "rationale": "Strip inherited host database/auth secrets case-insensitively while preserving runtime and identity allowlists."
+    },
+    {
+      "pr": 13742,
+      "url": "https://github.com/paperclipai/paperclip/pull/13742",
+      "head": "8742c6ea7ea936b55e4ad8a4d6f42cdfbd9574a5",
+      "base": "0f5fafe16b069b8f0c7f17eb9080d010aa6cd513",
+      "rationale": "Redact the complete arbitrary-key connector credentialValues envelope recursively and at HTTP serialization."
+    },
+    {
+      "pr": 15832,
+      "url": "https://github.com/paperclipai/paperclip/pull/15832",
+      "head": "10be54bcba8df2f68068daf4bb583c42ae6282ca",
+      "base": "9ba5569030cc4f37e53906d19e13778c81c99ecc",
+      "rationale": "Classify Codex auth failures from provider protocol errors and process diagnostics, excluding quoted application output."
+    },
+    {
+      "pr": 16368,
+      "url": "https://github.com/paperclipai/paperclip/pull/16368",
+      "head": "34eeb7908f573a6da9925dad371722b0f5a58be7",
+      "base": "3935e300dde652e2556b7f4f33b53ad8336f0f52",
+      "rationale": "Recognize dropped Claude network connections as transient under the existing bounded retry policy."
+    },
+    {
+      "pr": 16532,
+      "url": "https://github.com/paperclipai/paperclip/pull/16532",
+      "head": "319a2671d86078b46b27e17a3480a8c4b5f4d4dd",
+      "base": "185483e0909246b4609980a0e6e7ad3b8dbad1ba",
+      "rationale": "Avoid quadratic identifier and bracket rescans while preserving issue-reference extraction results."
+    },
+    {
+      "pr": 14236,
+      "url": "https://github.com/paperclipai/paperclip/pull/14236",
+      "head": "f7926357543d707e6e7cfee74e6bb10a0d261fbf",
+      "base": "be43c23e2df9fc88392390569f5e3b1356cfe275",
+      "rationale": "Keep local-login home cleanup with its owning reaper, clear empty setup-token leases, and bound terminal retention."
+    },
+    {
+      "pr": 15671,
+      "url": "https://github.com/paperclipai/paperclip/pull/15671",
+      "head": "e3d3bdc03043f69c6197aa30aa26dcda3f5b3f65",
+      "base": "b9750b152fccaba51939fbf2b48e237087626f33",
+      "rationale": "Recognize subscription usage reset wording; add isolated non-UTC host timezone regression coverage."
     }
   ],
   "held_candidates": {
@@ -43,6 +99,10 @@
     {
       "reason": "Respect allocator-owned CARGO_TARGET_DIR when staging native runner binaries.",
       "commit": "3871daeaa6816facadf7fcb998b654a33d8b40b9"
+    },
+    {
+      "reason": "Parse Claude setup-token terminal columns and wrapped credentials without exact footer or blank-line dependency; wait for complete clean exit. MIT-licensed normalization adapted from michaltakac/paperclip-claude-auth b52843396b511e8bc6ce3d906ba73f5ed111f308.",
+      "commit": "7dc0b53a7135b647fd051906deb9abbb46c07a18"
     }
   ]
 }
