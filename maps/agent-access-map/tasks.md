@@ -156,3 +156,15 @@ remaining operations before qualifying the whole capability.
 
 Gaps: The server governs whether a reported result becomes done/review/blocked.
 Generic lifecycle PATCH uses existing REST authorization, checkout and approval rules.
+
+### Direct assistant MCP fork extension
+
+The user OAuth surface exposes `paperclip_get_task_workflow`,
+`paperclip_get_task_github_link`, `paperclip_link_task_github_item`, and
+`paperclip_decide_task_review`. It acts as the connected person, not an agent.
+Linking is a fixed GitHub Sync local-link action after task privacy checks.
+Explicit review decisions require write consent, a current workflow version and
+that person's current review assignment; locked native transitions preserve
+review-policy, ownership and audit checks. Pending external tool actions remain
+outside this decision surface. Focused real-database regressions live in
+`server/src/__tests__/public-mcp.test.ts`; live qualification is reported separately.

@@ -1,3 +1,8 @@
+import { pluginRoutes } from "../routes/plugins.js";
+import { plugins } from "@paperclipai/db";
+import { normalizeIssueExecutionPolicy, applyIssueExecutionPolicyTransition } from "../services/issue-execution-policy.js";
+
+import { issueExecutionDecisions, toolActionRequests, toolInvocations, issueThreadInteractions } from "@paperclipai/db";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -666,8 +671,151 @@ describe.skipIf(!support.supported)("public MCP OAuth and tool boundary", () => 
     const execute = createPublicMcpExecutor(db, oauth, dispatch, transfers);
     const [issue] = await db.insert(issues).values({ companyId: f.company.id, title: "Work", status: "backlog" }).returning();
     const call = (name: string, a: Record<string, unknown> = {}) => execute(f.tokens.access_token, name, { companyId: f.company.id, ...a });
-    return { ...f, issue: issue!, call, dispatch, transfers, storage, cleanup: () => rm(storageDir, { recursive: true, force: true }) };
+    return { ...f, issue: issue!, call, api, dispatch, transfers, storage, cleanup: () => rm(storageDir, { recursive: true, force: true }) };
   }
+
+  async function reviewFixture() {
+    const f = await expandedFixture();
+    const [agent] = await db.insert(agents).values({ companyId: f.company.id, name: "Author", status: "paused" }).returning();
+    const policy = normalizeIssueExecutionPolicy({ stages: [{ type: "approval", participants: [{ type: "user", userId: f.actor.userId }] }] })!;
+    const original = { ...f.issue, status: "in_progress", assigneeAgentId: agent!.id, assigneeUserId: null, executionPolicy: policy };
+    const transition = applyIssueExecutionPolicyTransition({ issue: original, policy, requestedStatus: "done", requestedAssigneePatch: {}, actor: { agentId: agent!.id }, commentBody: "Ready for human review" });
+    await db.update(issues).set({ ...original, ...transition.patch }).where(eq(issues.id, f.issue.id));
+    return { ...f, agent: agent!, policy };
+  }
+
+  it("exposes bounded workflow metadata while omitting signed calls, bodies and runtime secrets", async () => {
+    const f = await reviewFixture();
+    try {
+      await db.insert(issueExecutionDecisions).values(Array.from({ length: 32 }, (_, i) => ({ companyId: f.company.id, issueId: f.issue.id, stageId: f.policy.stages[0]!.id, stageType: "approval", outcome: "changes_requested", body: "private decision body", actorUserId: f.actor.userId })));
+      const [invocation] = await db.insert(toolInvocations).values({ companyId: f.company.id, issueId: f.issue.id, toolName: "github:add_issue_comment", riskLevel: "write", status: "awaiting_approval", errorMessage: "PRIVATE_RUNTIME_SECRET" }).returning();
+      await db.insert(toolActionRequests).values({ companyId: f.company.id, issueId: f.issue.id, invocationId: invocation!.id, status: "pending", canonicalArgumentsHash: "synthetic", canonicalArgumentsSummary: {}, signedArguments: "PRIVATE_SIGNED_CALL", previewMarkdown: "PRIVATE_PREVIEW" });
+      const workflow = await f.call("paperclip_get_task_workflow", { taskId: f.issue.id });
+      expect(workflow).toMatchObject({ task: { status: "in_review", state: { currentParticipant: { userId: f.actor.userId } } }, truncated: { decisions: true }, toolActions: [{ riskLevel: "write", status: "pending", executionStatus: "awaiting_approval" }] });
+      expect(workflow.decisions).toHaveLength(30);
+      expect(JSON.stringify(workflow)).not.toMatch(/PRIVATE_|private decision body/);
+      const blocked = await f.call("paperclip_decide_task_review", { taskId: f.issue.id, requestId: randomUUID(), decision: "approve", expectedVersion: (workflow.task as any).version, note: "Approve internal work" });
+      expect(blocked).toMatchObject({ outcome: "rejected", status: 409, code: "MCP_TOOL_ACTION_PENDING" });
+      expect((await db.select().from(toolActionRequests).where(eq(toolActionRequests.invocationId, invocation!.id)))[0]?.status).toBe("pending");
+    } finally { await f.cleanup(); }
+  });
+
+  it.each(["approve", "request_changes"] as const)("records native %s as the assigned human once without overriding the workflow", async decision => {
+    const f = await reviewFixture();
+    const wake = vi.spyOn(assignmentWakeups, "queueIssueAssignmentWakeup").mockResolvedValue(null);
+    try {
+      const workflow = await f.call("paperclip_get_task_workflow", { taskId: f.issue.id });
+      const args = { taskId: f.issue.id, requestId: randomUUID(), decision, expectedVersion: (workflow.task as any).version, note: decision === "approve" ? "Reviewed and accepted internal work" : "Please correct the acceptance evidence" };
+      const result = await f.call("paperclip_decide_task_review", args);
+      expect(result).toMatchObject({ decision, externalActionApproved: false, task: { status: decision === "approve" ? "done" : "in_progress" } });
+      expect(await f.call("paperclip_decide_task_review", args)).toEqual(result);
+      const decisions = await db.select().from(issueExecutionDecisions).where(eq(issueExecutionDecisions.issueId, f.issue.id));
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0]).toMatchObject({ actorUserId: f.actor.userId, actorAgentId: null, outcome: decision === "approve" ? "approved" : "changes_requested", body: args.note });
+      expect((await db.select().from(agents).where(eq(agents.id, f.agent.id)))[0]?.status).toBe("paused");
+    } finally { wake.mockRestore(); await f.cleanup(); }
+  });
+
+  it("rejects stale, unassigned, active-run and ordinary status-based review decisions", async () => {
+    const f = await reviewFixture();
+    try {
+      const read = () => f.call("paperclip_get_task_workflow", { taskId: f.issue.id });
+      const decide = (expectedVersion: string) => f.call("paperclip_decide_task_review", { taskId: f.issue.id, requestId: randomUUID(), decision: "approve", expectedVersion, note: "Reviewed" });
+      const workflow = await read();
+      await db.update(issues).set({ title: "Changed since inspection", updatedAt: new Date(Date.now() + 1000) }).where(eq(issues.id, f.issue.id));
+      expect(await decide((workflow.task as any).version)).toMatchObject({ status: 409, code: "MCP_REVIEW_STALE" });
+      const [run] = await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: f.agent.id, status: "running", runtimeMode: "native", nativeIssueId: f.issue.id }).returning();
+      expect(await decide(((await read()).task as any).version)).toMatchObject({ status: 409, code: "MCP_ACTIVE_EXECUTION" });
+      await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, run!.id));
+      const issue = (await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0]!;
+      await db.update(issues).set({ assigneeUserId: "someone-else", executionState: { ...issue.executionState!, currentParticipant: { type: "user", userId: "someone-else", agentId: null } } }).where(eq(issues.id, f.issue.id));
+      expect(await decide(((await read()).task as any).version)).toMatchObject({ status: 403, code: "MCP_REVIEW_NOT_ASSIGNED" });
+      expect(await f.call("paperclip_finish_task", { taskId: f.issue.id, requestId: randomUUID() })).toMatchObject({ status: 403, code: "MCP_REVIEW_REQUIRED" });
+      expect(await db.select().from(issueExecutionDecisions).where(eq(issueExecutionDecisions.issueId, f.issue.id))).toHaveLength(0);
+    } finally { await f.cleanup(); }
+  });
+
+  it("links through only the fixed plugin action, preserves retry identity and blocks inaccessible tasks before dispatch", async () => {
+    const f = await expandedFixture();
+    const [plugin] = await db.insert(plugins).values({ pluginKey: "paperclip-github-plugin", packageName: "paperclip-github-plugin", version: "test", status: "ready", manifestJson: {} as never }).returning();
+    const bridge = vi.fn().mockResolvedValue({ kind: "issue", paperclipIssueId: f.issue.id, githubIssueNumber: 42, githubIssueUrl: "https://github.com/example/repo/issues/42", token: "PRIVATE_PLUGIN_TOKEN" });
+    f.api.use(pluginRoutes(db, {} as never, undefined, undefined, undefined, { workerManager: { call: bridge } as never }));
+    try {
+      const args = { taskId: f.issue.id, requestId: randomUUID(), githubUrl: "https://github.com/example/repo/issues/42" };
+      const linked = await f.call("paperclip_link_task_github_item", args);
+      expect(linked).toMatchObject({ link: { githubIssueNumber: 42, paperclipIssueId: f.issue.id } });
+      expect(JSON.stringify(linked)).not.toContain("PRIVATE_PLUGIN_TOKEN");
+      expect(await f.call("paperclip_link_task_github_item", args)).toEqual(linked);
+      expect(bridge).toHaveBeenCalledTimes(1);
+      expect(bridge.mock.calls[0]).toEqual([plugin!.id, "performAction", expect.objectContaining({ key: "issue.linkGitHubItem", actorContext: expect.objectContaining({ type: "user", userId: f.actor.userId, agentId: null, companyId: f.company.id }), params: { companyId: f.company.id, issueId: f.issue.id, kind: "issue", reference: args.githubUrl } })]);
+      expect(await f.call("paperclip_get_task_github_link", { taskId: f.issue.id })).toMatchObject({ link: { githubIssueNumber: 42 } });
+      for (const githubUrl of ["https://token@github.com/example/repo/issues/42", "https://github.com/example/repo/issues/42?token=bad", "https://evil.example/example/repo/issues/42"]) {
+        await expect(f.call("paperclip_link_task_github_item", { ...args, requestId: randomUUID(), githubUrl })).rejects.toThrow();
+      }
+      await makePrivate(f);
+      expect(await f.call("paperclip_link_task_github_item", { ...args, requestId: randomUUID() })).toMatchObject({ outcome: "rejected", status: 404 });
+      await expect(f.call("paperclip_get_task_workflow", { taskId: f.issue.id })).rejects.toMatchObject({ status: 404 });
+      expect(bridge).toHaveBeenCalledTimes(2);
+    } finally { await db.delete(plugins).where(eq(plugins.id, plugin!.id)); await f.cleanup(); }
+  });
+
+  it("requires write consent and current membership for link/review tools", async () => {
+    const f = await fixture("member", false);
+    const dispatch = vi.fn();
+    const execute = createPublicMcpExecutor(db, oauth, dispatch);
+    for (const [name, args] of [
+      ["paperclip_link_task_github_item", { githubUrl: "https://github.com/example/repo/issues/42" }],
+      ["paperclip_decide_task_review", { decision: "approve", expectedVersion: "a".repeat(64), note: "Reviewed" }],
+    ] as const) {
+      await expect(execute(f.tokens.access_token, name, { companyId: f.company.id, taskId: randomUUID(), requestId: randomUUID(), ...args })).rejects.toThrow("paperclip:write");
+    }
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the review snapshot after taking the task row lock", async () => {
+    const f = await reviewFixture();
+    try {
+      const workflow = await f.call("paperclip_get_task_workflow", { taskId: f.issue.id });
+      let locked!: () => void, release!: () => void;
+      const ready = new Promise<void>(resolve => { locked = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const edit = db.transaction(async tx => {
+        await tx.select().from(issues).where(eq(issues.id, f.issue.id)).for("update");
+        locked(); await gate;
+        await tx.update(issues).set({ updatedAt: new Date(Date.now() + 1000), title: "Concurrent revised work" }).where(eq(issues.id, f.issue.id));
+      });
+      await ready;
+      const decision = f.call("paperclip_decide_task_review", { taskId: f.issue.id, requestId: randomUUID(), decision: "approve", expectedVersion: (workflow.task as any).version, note: "Reviewed old work" });
+      // Observe PostgreSQL lock contention rather than relying on a fixed sleep.
+      let waiting = false;
+      try {
+        for (let i = 0; i < 100; i++) {
+          const rows = await db.execute(sql`select exists (select 1 from pg_stat_activity where datname=current_database() and wait_event_type='Lock') as waiting`);
+          if (rows[0]?.waiting) { waiting = true; break; }
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      } finally { release(); await edit; }
+      const result = await decision;
+      expect(waiting, JSON.stringify(result)).toBe(true);
+      expect(result).toMatchObject({ outcome: "rejected", status: 409, code: "MCP_REVIEW_STALE" });
+      expect(await db.select().from(issueExecutionDecisions).where(eq(issueExecutionDecisions.issueId, f.issue.id))).toHaveLength(0);
+      expect((await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0]?.status).toBe("in_review");
+    } finally { await f.cleanup(); }
+  });
+
+  it.each(["missing_policy", "orphaned_stage"])("rejects %s without applying native repair as a review decision", async kind => {
+    const f = await reviewFixture();
+    try {
+      const issue = (await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0]!;
+      await db.update(issues).set(kind === "missing_policy" ? { executionPolicy: null } : { executionState: { ...issue.executionState!, currentStageId: randomUUID() } }).where(eq(issues.id, f.issue.id));
+      const workflow = await f.call("paperclip_get_task_workflow", { taskId: f.issue.id });
+      for (const decision of ["approve", "request_changes"]) {
+        expect(await f.call("paperclip_decide_task_review", { taskId: f.issue.id, requestId: randomUUID(), decision, expectedVersion: (workflow.task as any).version, note: "Reviewed" })).toMatchObject({ outcome: "rejected", status: 409, code: "MCP_REVIEW_UNAVAILABLE" });
+      }
+      expect((await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0]?.status).toBe("in_review");
+      expect(await db.select().from(issueExecutionDecisions).where(eq(issueExecutionDecisions.issueId, f.issue.id))).toHaveLength(0);
+    } finally { await f.cleanup(); }
+  });
 
   async function makePrivate(f: Awaited<ReturnType<typeof expandedFixture>>) {
     const owner = randomUUID();

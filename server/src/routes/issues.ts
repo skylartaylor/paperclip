@@ -1,3 +1,4 @@
+import { mcpReviewDecisionSchema, assertMcpReviewDecision, assertNoPendingMcpToolAction, readMcpWorkflow } from "../services/public-mcp/workflow.js";
 import { parseObject } from "../adapters/utils.js";
 import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
 import { enqueueFastResponse } from "../services/fast-responses.js";
@@ -378,6 +379,7 @@ import {
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
+  mcpReviewDecision: mcpReviewDecisionSchema.optional(),
 });
 const queuedCommentMutationTargetSchema = z.object({
   queueId: z.string().min(1),
@@ -9358,6 +9360,13 @@ export function issueRoutes(
     });
   });
 
+  router.get("/issues/:id/workflow", async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    res.json(await readMcpWorkflow(db, issue));
+  });
+
   router.get("/issues/:id/watchdog", async (req, res) => {
     const id = req.params.id as string;
     const issue = await getAccessibleResource(
@@ -13545,8 +13554,11 @@ export function issueRoutes(
     res.json(result);
   });
 
-  async function assertMcpTaskParticipation(query: IssueQueueDb, issue: { id: string; companyId: string; checkoutRunId?: string | null; executionRunId?: string | null; status: string; executionState?: { status?: string } | null }) {
-    if (issue.status === "in_review" || issue.executionState?.status === "pending") {
+  async function assertMcpTaskParticipation(query: IssueQueueDb, issue: { id: string; companyId: string; checkoutRunId?: string | null; executionRunId?: string | null; status: string; executionState?: { status?: string } | null }, review?: z.infer<typeof mcpReviewDecisionSchema>, userId?: string) {
+    if (review) {
+      assertMcpReviewDecision(issue, review, userId);
+      await assertNoPendingMcpToolAction(query as Db, issue);
+    } else if (issue.status === "in_review" || issue.executionState?.status === "pending") {
       throw forbidden("Review decisions must be made in Paperclip", { code: "MCP_REVIEW_REQUIRED" });
     }
     const [active] = await query.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
@@ -13590,7 +13602,15 @@ export function issueRoutes(
       // MCP task changes cannot stop a run or implicitly decide a pending review.
       const mcpParticipationChange = req.actor.source === "mcp_oauth" &&
         ["status", "assigneeAgentId", "assigneeUserId", "blockedByIssueIds", "parentId", "projectId"].some(key => req.body[key] !== undefined);
-      if (mcpParticipationChange) await assertMcpTaskParticipation(db, existing);
+      if (req.body.mcpReviewDecision) {
+        if (req.actor.source !== "mcp_oauth" || req.actor.type !== "board" ||
+            Object.keys(req.body).some(key => !["status", "comment", "mcpReviewDecision"].includes(key)) ||
+            !req.body.comment?.trim() ||
+            req.body.status !== (req.body.mcpReviewDecision.decision === "approve" ? "done" : "in_progress")) {
+          throw forbidden("Use the dedicated MCP review operation with a note and workflow version");
+        }
+      }
+      if (mcpParticipationChange) await assertMcpTaskParticipation(db, existing, req.body.mcpReviewDecision, req.actor.userId);
 
       assertNoAgentHostWorkspaceCommandMutation(
         req,
@@ -13655,6 +13675,7 @@ export function issueRoutes(
         deferWakeForGoal,
         hiddenAt: hiddenAtRaw,
         expectedExecutionPolicy,
+        mcpReviewDecision: _mcpReviewDecision,
         onBehalfOfUserId: _requestedOnBehalfOfUserId,
         ...updateFields
       } = req.body;
@@ -14039,6 +14060,10 @@ export function issueRoutes(
         monitorExplicitlyUpdated:
           req.body.executionPolicy !== undefined && monitorChanged,
       });
+      if (req.body.mcpReviewDecision && transition.decision?.outcome !==
+          (req.body.mcpReviewDecision.decision === "approve" ? "approved" : "changes_requested")) {
+        throw conflict("This review stage is unavailable. Read the workflow and resolve its configuration in Paperclip.", { code: "MCP_REVIEW_UNAVAILABLE" });
+      }
       const decisionId = transition.decision ? randomUUID() : null;
       if (decisionId) {
         const nextExecutionState = transition.patch.executionState;
@@ -14435,7 +14460,7 @@ export function issueRoutes(
       ) => {
         const lockedExisting = await svc.getByIdForUpdate(id, tx);
         if (!lockedExisting) return false;
-        if (mcpReviewSensitiveMutation) await assertMcpTaskParticipation(tx ?? db, lockedExisting);
+        if (mcpReviewSensitiveMutation) await assertMcpTaskParticipation(tx ?? db, lockedExisting, req.body.mcpReviewDecision, req.actor.userId);
         const lockedPolicyChangeRequested =
           req.body.reviewPolicy !== undefined &&
           req.body.reviewPolicy !== lockedExisting.reviewPolicy;

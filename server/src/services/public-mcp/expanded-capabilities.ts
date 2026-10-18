@@ -57,7 +57,7 @@ const nonempty = <T extends z.ZodObject>(schema: T) => schema.refine(v => Object
 export const expandedMcpCapabilities: Capability[] = [
   {
     name: "paperclip_update_task", write: true, destructive: true,
-    description: "Edit a task's title, description, priority, project, parent, dependencies, assignment or status as the connected person. Assignment/status changes may schedule agents and spend configured budget. Review decisions must be made in Paperclip. Reuse requestId on retries.",
+    description: "Edit a task's title, description, priority, project, parent, dependencies, assignment or status as the connected person. Assignment/status changes may schedule agents and spend configured budget. For review decisions use paperclip_decide_task_review; status changes cannot bypass review. Reuse requestId on retries.",
     schema: z.object({ ...task, requestId, changes: nonempty(taskChanges) }).strict(),
     run: async (p, a, api) => ({ task: pick(await api(p, "PATCH", `/issues/${pathId(a.taskId)}`, a.changes), taskFields) }),
   },

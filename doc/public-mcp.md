@@ -510,3 +510,38 @@ noninteractive Codex invocation that forbids tool approvals may read successfull
 but refuse a write. Approve the intended tool in the host rather than weakening
 server permissions. The [qualification record](plans/2026-10-06-expanded-assistant-mcp-verification.md)
 distinguishes paid model tests, actual-client proof and staging verification.
+
+## Fork extension: task links and workflow reviews
+
+The direct assistant surface also includes four named operations:
+
+- `paperclip_get_task_workflow`: bounded native stage/participant, decision,
+  pending interaction, active-run and tool-action status metadata. Each collection
+  is capped at 30 with explicit truncation flags. Signed arguments, tool previews,
+  credentials and raw run output are excluded. It does not launch agents.
+- `paperclip_get_task_github_link`: read the installed GitHub Sync plugin's link.
+- `paperclip_link_task_github_item`: link one accessible task to an existing
+  `https://github.com/owner/repo/issues/number` or `/pull/number` URL. Uses only
+  GitHub Sync's `issue.linkGitHubItem` UI action and existing repository mappings;
+  cannot replace links, supply tokens, choose arbitrary plugin actions or write
+  to GitHub. Normal write consent and durable MCP retry receipts apply.
+- `paperclip_decide_task_review`: explicitly approve or request changes with a
+  mandatory note and the version returned by the workflow read. Requires specific
+  user authorization for the decision. Only the current assigned human participant
+  can decide; board override is disabled. Both preflight and the locked native
+  update recheck the snapshot, participant and active-run ownership. Stale work,
+  unavailable review state and unresolved tool calls reject without deciding.
+
+Review decisions reuse the normal issue transition, decision ledger, user
+attribution, activity log and scheduling path. Advancing a stage or requesting
+changes can schedule an agent and consume its configured budget. Lifecycle-paused
+agents remain paused. Ordinary task status tools still cannot decide reviews.
+Tool-action approval/execution remains in Paperclip's human interface; accepting
+internal work cannot grant permission to post a GitHub comment or execute another
+pending external action.
+
+GitHub linking requires the separately installed `paperclip-github-plugin` with
+its existing `issue.githubDetails` / `issue.linkGitHubItem` contract. Missing or
+unavailable plugins fail explicitly; no credential or alternative publication
+fallback is attempted. Link reads use plugin state; link creation reads current
+GitHub metadata. The fixed bridge call follows task privacy authorization.

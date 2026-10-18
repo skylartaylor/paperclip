@@ -145,6 +145,18 @@
         "65 focused tests including native write-risk approval/dispatch regression",
         "server TypeScript compile"
       ]
+    },
+    {
+      "id": "assistant-mcp-workflow",
+      "date": "2026-10-18",
+      "reason": "Expose fixed GitHub Sync local linking and bounded native workflow visibility; assigned-human review decisions require current snapshots, active-run checks and native decision records. External tool approvals remain separate.",
+      "source": "doc/public-mcp.md",
+      "related_prs": [
+        15380,
+        12549,
+        14538,
+        16420
+      ]
     }
   ]
 }
