@@ -235,7 +235,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
   });
 
   it("classifies GitHub add_issue_comment as write and gates it before plugin dispatch", async () => {
-    const { company, agent, run } = await createRunFixture(db);
+    const { company, agent, issue, run } = await createRunFixture(db);
     const dispatcher = fakePluginDispatcher();
     vi.spyOn(dispatcher, "listToolsForAgent").mockReturnValue([{
       name: "paperclip-github-plugin:add_issue_comment", displayName: "Add issue comment",
@@ -249,7 +249,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     const gateway = createTestToolGatewayService(db, { pluginToolDispatcher: dispatcher });
     await expect(gateway.executePluginTool({
       actor: { type: "agent", companyId: company.id, agentId: agent.id, runId: run.id },
-      tool: "paperclip-github-plugin:add_issue_comment", parameters: { body: "Synthetic test only" },
+      tool: "paperclip-github-plugin:add_issue_comment", parameters: { body: "Synthetic test only", paperclipIssueId: issue.id },
       runContext: { companyId: company.id, agentId: agent.id, runId: run.id },
     })).rejects.toMatchObject({ reasonCode: "approval_required" });
     const [invocation] = await db.select().from(toolInvocations);
@@ -258,6 +258,29 @@ describeEmbeddedPostgres("tool gateway service", () => {
     const [interaction] = await db.select().from(issueThreadInteractions);
     expect(interaction.effectiveResolverPolicy).toBe("human_only");
   });
+
+  it.each([undefined, "00000000-0000-4000-8000-000000000123"])(
+    "rejects GitHub comments naming a missing or different task (%s) before review or dispatch",
+    async (paperclipIssueId) => {
+      const { company, agent, run } = await createRunFixture(db);
+      const dispatcher = fakePluginDispatcher();
+      vi.spyOn(dispatcher, "listToolsForAgent").mockReturnValue([{
+        name: "paperclip-github-plugin:add_issue_comment", displayName: "Add issue comment",
+        description: "Post a comment", parametersSchema: { type: "object" }, pluginId: "fixture-plugin",
+      }]);
+      const dispatch = vi.spyOn(dispatcher, "executeTool");
+      const gateway = createTestToolGatewayService(db, { pluginToolDispatcher: dispatcher });
+      await expect(gateway.executePluginTool({
+        actor: { type: "agent", companyId: company.id, agentId: agent.id, runId: run.id },
+        tool: "paperclip-github-plugin:add_issue_comment",
+        parameters: { body: "Synthetic test only", ...(paperclipIssueId ? { paperclipIssueId } : {}) },
+        runContext: { companyId: company.id, agentId: agent.id, runId: run.id },
+      })).rejects.toMatchObject({ status: 403, reasonCode: "plugin_task_binding_mismatch" });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(await db.select().from(toolActionRequests)).toHaveLength(0);
+      expect(await db.select().from(toolInvocations)).toHaveLength(0);
+    },
+  );
 
   it("gates write tools with an action request and executes only stored reviewed arguments once", async () => {
     const { company, agent, run } = await createRunFixture(db);

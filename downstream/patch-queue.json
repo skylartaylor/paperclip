@@ -157,6 +157,20 @@
         14538,
         16420
       ]
+    },
+    {
+      "id": "coordinator-github-mcp-bridge",
+      "date": "2026-10-18",
+      "reason": "Expose a bounded, run-scoped local GitHub plugin MCP facade; bind comment requests to the authenticated current task before approval instead of a fixed pilot task policy. Preserve native human-only write approvals and avoid connection-setup discovery for installed plugins.",
+      "files": [
+        "scripts/paperclip-github-mcp.py",
+        "scripts/tests/test_paperclip_github_mcp.py",
+        "server/src/services/tool-gateway.ts"
+      ],
+      "validation": [
+        "14 loopback HTTP/protocol/identity tests",
+        "41 gateway tests including before-review task-binding regressions"
+      ]
     }
   ]
 }

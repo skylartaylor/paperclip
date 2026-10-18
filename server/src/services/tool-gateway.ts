@@ -11054,6 +11054,19 @@ export function createToolGatewayService(
       }
 
       const requestedParameters = input.parameters ?? {};
+      // GitHub comment handoffs follow the authenticated run's task, rather
+      // than a deployment policy pinned to a previous pilot task. Reject a
+      // cross-task request before creating an approval card or dispatching.
+      if (input.actor.type === "agent"
+        && input.tool === "paperclip-github-plugin:add_issue_comment"
+        && (!context.issueId
+          || asRecord(requestedParameters)?.paperclipIssueId !== context.issueId)) {
+        throw new ToolGatewayHttpError(
+          403,
+          "GitHub comment requests must name the current run's Paperclip task",
+          "plugin_task_binding_mismatch",
+        );
+      }
       const argumentValidation = validateToolContent({
         value: requestedParameters,
         direction: "arguments",
