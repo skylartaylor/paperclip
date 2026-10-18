@@ -74,13 +74,14 @@ function osc8Hyperlink(url: string, display: string): string {
   return `${ESC}]8;;${url}${ESC}\\${display}${ESC}]8;;${ESC}\\`;
 }
 
-// Joins `words` with a Cursor Horizontal Absolute (CHA) sequence. The live
-// Claude login UI lays out each word at an absolute column with a CHA sequence
-// instead of a literal space, so this reproduces one Ink-rendered line. The
-// column number does not matter to the parser, so this uses a fixed number. The
-// parser must render each CHA sequence as a space to read the line.
+// Render the words at real absolute columns, as the terminal does.
 function chaSpaced(words: string[]): string {
-  return words.join("\x1b[9G");
+  let column = 1;
+  return words.map((word, index) => {
+    const prefix = index === 0 ? "" : `\x1b[${column}G`;
+    column += word.length + 1;
+    return prefix + word;
+  }).join("");
 }
 
 // Wraps a string into physical lines of at most `width` characters, joined with
@@ -401,7 +402,7 @@ describe("parseSetupTokenPrompt", () => {
   it("reads the preamble and the prompt when the terminal spaces words with cursor-column sequences", () => {
     // The live Claude login UI lays out each word at an absolute column with a
     // CHA sequence, so it emits no literal space between two words. The parser
-    // renders each CHA sequence as a space; without that step the words glue
+    // restores the spaces from absolute columns; without that step the words glue
     // together and the preamble and the prompt never match.
     const preamble = chaSpaced([
       "Browser",
@@ -597,7 +598,7 @@ describe("parseSetupTokenCredential", () => {
   it("reads the token when the terminal spaces the anchor words with cursor-column sequences", () => {
     // The success screen renders the anchor lines the same way as the prompt: it
     // lays out each word at an absolute column with a CHA sequence. The parser
-    // renders each CHA sequence as a space, so the anchor lines match the exact
+    // restores the spaces from absolute columns, so the anchor lines match the exact
     // anchor text and the token binds between them.
     const beforeAnchor = chaSpaced([
       "Your",
@@ -713,4 +714,28 @@ describe("parseSetupTokenCredential", () => {
     expect(fixture).toContain(SETUP_TOKEN_AFTER_ANCHOR);
     expect(fixture).toContain(SETUP_TOKEN_PREFIX);
   });
+  it("reads a complete token block even when the success footer changes", () => {
+    const text = successScreen([TOKEN_FRAGMENT_A, TOKEN_FRAGMENT_B])
+      .replace(SETUP_TOKEN_AFTER_ANCHOR, "Keep this credential private.");
+    expect(parseSetupTokenCredential(text)).toBe(FULL_TOKEN);
+  });
+
+  it("does not insert spaces when an absolute cursor move lands inside a word", () => {
+    const heading = "Your OAuth to\x1b[14Gken (valid for 1 year):";
+    const text = [heading, "", FULL_TOKEN, "", "Store this to\x1b[14Gken securely."].join("\r\n");
+    expect(parseSetupTokenCredential(text)).toBe(FULL_TOKEN);
+  });
+
+  it("rejects an unterminated token block and prose inside a token block", () => {
+    expect(parseSetupTokenCredential([SETUP_TOKEN_BEFORE_ANCHOR, "", FULL_TOKEN].join("\n"))).toBeNull();
+    expect(parseSetupTokenCredential([SETUP_TOKEN_BEFORE_ANCHOR, "", TOKEN_FRAGMENT_A, "unexpected prose", TOKEN_FRAGMENT_B, ""].join("\n"))).toBeNull();
+  });
+
+  it("reads the live 2.1.302 layout with prose directly after wrapped token lines", () => {
+    const text = [SETUP_TOKEN_BEFORE_ANCHOR, "", TOKEN_FRAGMENT_A, TOKEN_FRAGMENT_B,
+      "  Store this token securely. You won't be able to see it again.",
+      "  Use this token by setting an environment variable.", " "].join("\r\n");
+    expect(parseSetupTokenCredential(text)).toBe(FULL_TOKEN);
+  });
+
 });

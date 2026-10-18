@@ -372,4 +372,28 @@ describe("runSetupTokenLogin", () => {
   it("exposes the fixed setup-token command", () => {
     expect(CLAUDE_SETUP_TOKEN_COMMAND).toBe("claude setup-token");
   });
+  it("waits for the complete stream and ignores changes to footer prose", async () => {
+    const output = SUCCESS_OUTPUT.replace("Store this token securely. You won't be able to see it again.", "Keep this credential private.");
+    const split = output.indexOf(TOKEN_FRAGMENT_A) + 27;
+    const fake = createFakeDriver({ chunks: [PROMPT_OUTPUT, output.slice(0, split), output.slice(split)], exitCode: 0 });
+    let delivered = "";
+    const result = await runSetupTokenLogin(fake.driver, {
+      onPrompt: () => {}, provideCode: async () => BROWSER_CODE,
+      onCredential: async (bytes) => { delivered = bytes.toString("utf8"); }, timeoutMs: 1000,
+    });
+    expect(result.outcome).toBe("success");
+    expect(delivered).toBe(FULL_TOKEN);
+  });
+
+  it("rejects a second success record arriving in a later chunk", async () => {
+    const fake = createFakeDriver({ chunks: [PROMPT_OUTPUT, SUCCESS_OUTPUT, SUCCESS_OUTPUT], exitCode: 0 });
+    const sink = vi.fn(async () => {});
+    const result = await runSetupTokenLogin(fake.driver, {
+      onPrompt: () => {}, provideCode: async () => BROWSER_CODE,
+      onCredential: sink, timeoutMs: 1000,
+    });
+    expect(result.outcome).toBe("failure");
+    expect(sink).not.toHaveBeenCalled();
+  });
+
 });

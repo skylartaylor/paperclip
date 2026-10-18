@@ -17,12 +17,9 @@
 // to the dedicated line after the URL block; a repeated URL line, a code-like
 // value on the wrong line, or an unrelated line cannot form a prompt.
 //
-// The token parser binds the token to the exact success record: it requires the
-// before-anchor line and the after-anchor line, in that order, exactly one time
-// each, and it reads only the lines between them. It de-wraps the token across
-// the physical terminal lines. It fails closed for any other input. Both parsers
-// never log any input byte, and they keep every input byte out of each thrown
-// error. Both parsers are pure functions.
+// The token parser reads one complete token block below its
+// heading. Footer prose is presentation, not a credential delimiter. Both parsers
+// are pure functions and never log input or include it in thrown errors.
 
 export interface SetupTokenPrompt {
   // The validated authorization URL, exactly as the terminal emitted it.
@@ -127,25 +124,11 @@ const MAX_URL_LENGTH = 2048;
 // wrapped URL holds only these characters after a trim.
 const URL_CHARS_ONLY_RE = /^[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+$/;
 
-// An ANSI Control Sequence Introducer (CSI): the ESC control byte, a `[`, zero
-// or more parameter bytes (0x30-0x3F), zero or more intermediate bytes
-// (0x20-0x2F), and one final byte (0x40-0x7E). The Claude terminal wraps the
-// output in CSI color sequences. The parser removes every CSI sequence first, so
-// a colored prompt reads the same as a plain one.
+// Cursor handling is column-aware: a move to the next character in a word
+// contributes no space, while a forward move contributes its actual width.
 // eslint-disable-next-line no-control-regex
-const ANSI_CSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
-
-// A horizontal-move CSI sequence: Cursor Horizontal Absolute (final byte `G`)
-// and Cursor Forward (final byte `C`). The Claude login UI lays out each word at
-// an absolute column with one of these sequences, so it emits no literal space
-// between two words. The parser replaces each horizontal-move sequence with one
-// space, so a word gap reads as a space. Without this step the later CSI removal
-// deletes the sequence and glues the two words, and the URL preamble line, the
-// browser-code prompt line, and the success anchor lines never match. The
-// vertical and color sequences carry no horizontal text gap; the CSI removal
-// below drops them.
-// eslint-disable-next-line no-control-regex
-const CSI_HORIZONTAL_MOVE_RE = /\x1b\[[0-9;]*[GC]/g;
+const CSI_ONE_RE = /^\x1b\[([0-?]*)([ -/]*)([@-~])/;
+const MAX_CURSOR_PADDING = 200;
 
 // An OSC 8 hyperlink. The terminal emits the URL through an OSC 8 hyperlink plus
 // wrapped display text. The hyperlink carries the true, unwrapped URL in its URI
@@ -205,20 +188,70 @@ interface SetupTokenUrlMatch {
 }
 
 /**
- * Removes the terminal control sequences from `text`. Replaces each OSC 8
- * hyperlink with its true URI, so the parser reads the unwrapped URL and drops
- * the wrapped display text. Removes each leftover OSC sequence. Replaces each
- * horizontal-move CSI sequence with one space, so a word that the login UI lays
- * out at an absolute column reads as a space-separated word. Removes each
- * remaining ANSI CSI sequence. Returns plain text. The function only normalizes
- * the input; the URL and the prompt still pass the shape validation below.
+ * Column-aware normalization adapted from michaltakac/paperclip-claude-auth,
+ * src/setup-token/parse.ts at b52843396b511e8bc6ce3d906ba73f5ed111f308.
+ * Keeps this adapter's stricter OSC URL and credential validation.
+ *
+ * MIT License
+ *
+ * Copyright (c) 2026 Michal Takáč
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 function stripTerminalControls(text: string): string {
-  return text
-    .replace(OSC8_HYPERLINK_RE, "$1")
-    .replace(OSC_ANY_RE, "")
-    .replace(CSI_HORIZONTAL_MOVE_RE, " ")
-    .replace(ANSI_CSI_RE, "");
+  const source = text.replace(OSC8_HYPERLINK_RE, "$1").replace(OSC_ANY_RE, "");
+  let out = "";
+  let column = 0;
+  let i = 0;
+  const pad = (count: number) => {
+    const n = Math.min(MAX_CURSOR_PADDING, Math.max(0, count));
+    out += " ".repeat(n);
+    column += n;
+  };
+  while (i < source.length) {
+    const char = source[i]!;
+    if (char === "\x1b") {
+      const csi = CSI_ONE_RE.exec(source.slice(i));
+      if (csi) {
+        const params = csi[1] ?? "";
+        if (/^\d*$/.test(params)) {
+          const count = Math.max(1, Number.parseInt(params || "1", 10));
+          if (csi[3] === "G") pad(Math.max(0, count - 1 - column));
+          else if (csi[3] === "C") pad(count);
+        }
+        i += csi[0].length;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (char === "\r" || char === "\n") {
+      out += "\n";
+      column = 0;
+      i += char === "\r" && source[i + 1] === "\n" ? 2 : 1;
+      continue;
+    }
+    out += char;
+    column += 1;
+    i += 1;
+  }
+  return out;
 }
 
 /**
@@ -438,8 +471,8 @@ export const SETUP_TOKEN_PREFIX = "sk-ant-oat01-";
 // right before the token block. The token parser binds the token to this anchor.
 export const SETUP_TOKEN_BEFORE_ANCHOR = "Your OAuth token (valid for 1 year):";
 
-// The line that follows the token. The success screen prints this exact line
-// right after the token block. The token parser binds the token to this anchor.
+// Historical footer retained for characterization fixtures. Credential parsing
+// deliberately does not depend on this presentation text.
 export const SETUP_TOKEN_AFTER_ANCHOR =
   "Store this token securely. You won't be able to see it again.";
 
@@ -463,7 +496,7 @@ const FULL_TOKEN_RE = /^sk-ant-oat01-[A-Za-z0-9_-]{20,}$/;
 function singleAnchorIndex(lines: string[], anchor: string): number | null {
   let found: number | null = null;
   for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].trim() !== anchor) continue;
+    if (lines[i].trim().replace(/\s+/g, " ") !== anchor) continue;
     if (found !== null) return null;
     found = i;
   }
@@ -471,55 +504,44 @@ function singleAnchorIndex(lines: string[], anchor: string): number | null {
 }
 
 /**
- * Parses the Claude `setup-token` success screen and returns the minted OAuth
- * token, or null. The parser removes the terminal control sequences first, then
- * binds the token to the exact success record. It requires the before-anchor
- * line {@link SETUP_TOKEN_BEFORE_ANCHOR} and the after-anchor line
- * {@link SETUP_TOKEN_AFTER_ANCHOR}, in that order, exactly one time each. It
- * reads only the lines between the two anchors. It de-wraps the token: it joins
- * the fragment lines with no separator, the same way the terminal split one
- * token across the physical lines. It validates the joined value against the
- * token shape.
- *
- * The parser fails closed for any other input. It returns null for a
- * token-shaped value outside the two anchors (before submit, in retry or error
- * text, or after a cancellation), a duplicate success block, an anchor out of
- * order, a missing anchor, extra text on a token line, a stray prose line
- * between the anchors, a wrong prefix, and a value that does not match the token
- * shape. It never logs any input byte and never puts any input byte into a
- * thrown error. The parser is a pure function.
+ * Read one complete token block beneath the unique success heading. Rejoin
+ * wrapped fragments, keeping the adapter's strict prefix and alphabet checks.
+ * A blank line or the first prose line terminates the block, as in the upstream
+ * plugin. Footer wording is not part of the protocol.
+ * Missing/duplicate headings, incomplete blocks, or prose within the block fail
+ * closed. The runner invokes this only after the complete process stream exits.
  */
 export function parseSetupTokenCredential(text: string): string | null {
   if (typeof text !== "string" || text.length === 0) return null;
-  const clean = stripTerminalControls(text);
-  // Canonicalize the record delimiter. The real terminal redraw joins the
-  // before-anchor line, the token, and the after-anchor line with a bare
-  // carriage return, or a CRLF pair, instead of a line feed. Map each CRLF and
-  // each bare carriage return to one line feed, so each anchor line and each
-  // token fragment lands on its own line. This step changes the record
-  // delimiter only. It cannot add a token byte, and the interval validation
-  // below still rejects partial, extra, or prose data.
-  const normalized = clean.replace(/\r\n|\r/g, "\n");
-  const lines = normalized.split("\n");
-
+  const lines = stripTerminalControls(text).split("\n");
   const beforeIndex = singleAnchorIndex(lines, SETUP_TOKEN_BEFORE_ANCHOR);
-  const afterIndex = singleAnchorIndex(lines, SETUP_TOKEN_AFTER_ANCHOR);
-  if (beforeIndex === null || afterIndex === null) return null;
-  if (afterIndex <= beforeIndex) return null;
+  if (beforeIndex === null) return null;
 
-  // Read only the non-blank lines strictly between the two anchors. Each line
-  // must be one token fragment. A stray prose line, or extra text on a token
-  // line, fails the fragment test and the parser returns null.
   const fragments: string[] = [];
-  for (let i = beforeIndex + 1; i < afterIndex; i += 1) {
+  let terminated = false;
+  for (let i = beforeIndex + 1; i < lines.length; i += 1) {
     const trimmed = lines[i].trim();
-    if (trimmed.length === 0) continue;
-    if (!TOKEN_FRAGMENT_RE.test(trimmed)) return null;
+    if (!trimmed) {
+      if (fragments.length) { terminated = true; break; }
+      continue;
+    }
+    if (!TOKEN_FRAGMENT_RE.test(trimmed)) {
+      if (fragments.length === 0) return null;
+      // The CLI can put footer prose immediately below the wrapped token, with
+      // no intervening blank line. Never append that prose. Reject a later
+      // fragment before the next blank line: prose inserted into a wrapped
+      // credential must not turn its first half into a truncated credential.
+      for (let j = i + 1; j < lines.length && lines[j].trim(); j += 1) {
+        if (TOKEN_FRAGMENT_RE.test(lines[j].trim())) return null;
+      }
+      terminated = true;
+      break;
+    }
     fragments.push(trimmed);
   }
-  if (fragments.length === 0) return null;
-
+  if (!terminated || fragments.length === 0) return null;
   const token = fragments.join("");
   if (!FULL_TOKEN_RE.test(token)) return null;
+  if (token.indexOf(SETUP_TOKEN_PREFIX, SETUP_TOKEN_PREFIX.length) !== -1) return null;
   return token;
 }

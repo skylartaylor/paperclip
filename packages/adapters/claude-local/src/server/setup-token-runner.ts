@@ -30,7 +30,7 @@ import {
 // and any token byte out of every log line and every thrown error.
 //
 // Fail-closed credential delivery. The `onCredential` sink is mandatory and
-// awaited. The runner binds the token from the exact success record with
+// awaited. The runner binds the token from the completed success record with
 // {@link parseSetupTokenCredential}, then it awaits the sink one time. It sets
 // `credentialDelivered` true only after the sink resolves. A missing sink, a
 // success stream with no token, and a sink rejection each end the run as a
@@ -220,10 +220,9 @@ export async function runSetupTokenLogin(
   let submitStarted = false;
   // The runner sets this true one time, only after the mandatory sink resolves.
   let credentialDelivered = false;
-  // The bound token bytes. The runner binds them from the success record during
-  // the stream, holds them in memory only, awaits the sink one time after a
-  // clean exit, and zeros them in a `finally` block on every path. A null value
-  // means the runner never bound a token.
+  // Bind the credential only after the full stream exits successfully. Waiting
+  // prevents a chunk boundary from truncating the token or hiding a later
+  // duplicate success heading. The sink consumes and then zeros these bytes.
   let tokenBytes: Buffer | null = null;
   // The code-input routine runs beside the race. It is self-guarding and never
   // rejects, so an unresolved provider cannot become an unhandled rejection.
@@ -237,10 +236,7 @@ export async function runSetupTokenLogin(
   // {@link CLAUDE_SETUP_TOKEN_MAX_BUFFER_CHARS}. The runner keeps the trailing
   // window and drops the oldest characters.
   let buffer = "";
-  // The in-memory token buffer. The runner accumulates the post-prompt stream
-  // here, parses the full buffer before any truncation, and drops it as soon as
-  // it binds the token. It bounds the retained window the same way as the prompt
-  // buffer, so the secret-bearing stream never grows without a bound.
+  // Retain only the bounded post-prompt stream, in memory, until process exit.
   let tokenBuffer = "";
 
   // Reads the browser code and writes it to the matched prompt one time. The
@@ -271,11 +267,7 @@ export async function runSetupTokenLogin(
     }
   };
 
-  // Binds the token from the token buffer one time and holds the bytes in
-  // memory. The runner scans only when a caller provides an `onCredential` sink,
-  // so it never holds the secret-bearing stream without a need. It drops the
-  // token buffer as soon as the parser binds the token. The runner delivers the
-  // bytes later, after a clean exit, through {@link deliverCredential}.
+  // Parse once at clean exit and keep the token only through sink delivery.
   const captureCredential = (): void => {
     if (!onCredential || tokenBytes) return;
     const token = parseSetupTokenCredential(tokenBuffer);
@@ -329,12 +321,10 @@ export async function runSetupTokenLogin(
       }
       return;
     }
-    // The prompt already surfaced. Scan the post-prompt stream for the success
-    // token. The runner scans only when a caller provides an `onCredential`
-    // sink, so it never holds the secret-bearing stream without a need.
+    // Retain post-prompt bytes only for credential delivery. Parse the complete
+    // bounded record after clean exit, never a potentially partial chunk.
     if (!onCredential || tokenBytes) return;
     tokenBuffer += chunk;
-    captureCredential();
     if (!tokenBytes && tokenBuffer.length > CLAUDE_SETUP_TOKEN_MAX_BUFFER_CHARS) {
       tokenBuffer = tokenBuffer.slice(tokenBuffer.length - CLAUDE_SETUP_TOKEN_MAX_BUFFER_CHARS);
     }
@@ -380,6 +370,8 @@ export async function runSetupTokenLogin(
     // sink and await it. The runner fails closed: a missing sink, a clean exit
     // with no bound token, and a sink rejection each end the run as a failure. It
     // reports success only after the sink resolves.
+    captureCredential();
+    tokenBuffer = "";
     const delivered = await deliverCredential();
     if (!delivered) {
       log("[paperclip] Setup-token login: the credential did not land; treating the run as a failure.");
@@ -403,6 +395,8 @@ export async function runSetupTokenLogin(
       leftover.fill(0);
       tokenBytes = null;
     }
+    buffer = "";
+    tokenBuffer = "";
     // Stop a pending code-input routine, then stop the child and dispose.
     controller.abort();
     await stopAndDispose(driver, log);
