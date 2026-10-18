@@ -337,6 +337,14 @@ describe("parseSetupTokenPrompt", () => {
     expect(parseSetupTokenPrompt(completeOutput(withKey))).toBeNull();
   });
 
+  it("skips the 2.1.291 copy hint between the URL and the prompt", () => {
+    const hint = chaSpaced("Hold Shift while selecting to use your terminal's native copy".split(" "));
+    const text = [PREAMBLE_LINE, hardWrap(CLAUDE_COM_URL, 130), "", hint, "", "", PROMPT_LINE].join("\n");
+    const result = parseSetupTokenPrompt(text);
+    expect(result?.url).toBe(CLAUDE_COM_URL);
+    expect(result?.prompt).toBe(SETUP_TOKEN_PROMPT);
+  });
+
   it("returns null when a code-like value sits on the line after the URL", () => {
     // The line right after the URL must hold the browser-code prompt. A code-like
     // value on that line cannot bind, so the parser returns null.
@@ -416,6 +424,26 @@ describe("parseSetupTokenPrompt", () => {
     expect(result).not.toBeNull();
     expect(result?.url).toBe(CLAUDE_COM_URL);
     expect(result?.prompt).toBe(SETUP_TOKEN_PROMPT);
+  });
+
+  it("accepts the native-copy hint emitted by Claude 2.1.302 on a service terminal", () => {
+    const text = [
+      PREAMBLE_LINE,
+      ...Array(5).fill(osc8Hyperlink(CLAUDE_COM_URL, "wrapped display row")),
+      "",
+      " Hold Shift while selecting to use your terminal's native copy",
+      "",
+      PROMPT_LINE,
+    ].join("\r\n");
+    expect(parseSetupTokenPrompt(text)?.url).toBe(CLAUDE_COM_URL);
+  });
+
+  it.each([
+    "Hold Shift while selecting to use your terminal's native copy extra",
+    "Hold Shift while selecting to use your terminal's native copy\nUnexpected instruction",
+  ])("rejects unexpected text around the native-copy hint: %s", (hint) => {
+    const text = [PREAMBLE_LINE, CLAUDE_COM_URL, hint, PROMPT_LINE].join("\n");
+    expect(parseSetupTokenPrompt(text)).toBeNull();
   });
 
   it("binds the prompt after the terminal repeats the URL once per wrapped display row", () => {

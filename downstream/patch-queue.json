@@ -23,6 +23,13 @@
       "head": "9af98b1f45d5110ed911a8495dc66f6e933f04d0",
       "base": "2723168083ad9a460f35199357d5d4c5d53f02d6",
       "rationale": "Isolate failing scheduler steps and bound optional routine metrics; preserve current upstream routine status reconciliation."
+    },
+    {
+      "pr": 15550,
+      "url": "https://github.com/paperclipai/paperclip/pull/15550",
+      "head": "b1da29402613f60a54b109d12214e57167c099c3",
+      "base": "d0f69670db2aba8ddae992594edacc5504e39fbf",
+      "rationale": "Recognize the Claude setup-token native-copy hint so browser subscription sign-in exposes its authorization URL."
     }
   ],
   "held_candidates": {
