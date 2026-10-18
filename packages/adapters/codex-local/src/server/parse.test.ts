@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   classifyCodexAuthRefreshFailure,
@@ -181,6 +182,65 @@ describe("classifyCodexAuthRefreshFailure", () => {
     expect(classifyCodexAuthRefreshFailure({ errorMessage: "chatgpt wham api returned 401" })).toBeNull();
     expect(classifyCodexAuthRefreshFailure({ errorMessage: "You've hit your usage limit for GPT-5." })).toBeNull();
   });
+
+  it.each([
+    "Invalid or expired refresh token",
+    "refresh_token_reused",
+    "credential refresh returned 401 Unauthorized",
+  ])("does not revoke auth when a failed review quotes %s in tool or agent output", (quotedError) => {
+    const providerError = "This content was flagged for possible cybersecurity risk.";
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "review-thread" }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "command_execution", aggregated_output: `throw unauthorized('${quotedError}');` },
+      }),
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: quotedError } }),
+      JSON.stringify({ type: "error", message: providerError }),
+      JSON.stringify({ type: "turn.failed", error: { message: providerError } }),
+    ].join("\n");
+    expect(classifyCodexAuthRefreshFailure({ stdout, errorMessage: parseCodexJsonl(stdout).errorMessage })).toBeNull();
+    expect(parseCodexJsonl(stdout).errorMessage).toBe(providerError);
+  });
+
+  it.each([
+    ["refresh_token_reused", "refresh_token_reused"],
+    ["refresh token has expired", "refresh_token_expired"],
+    ["OAuth failed: invalid_grant", "refresh_token_invalidated"],
+  ])("still classifies a real protocol failure: %s", (message, expected) => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "auth-thread" }),
+      JSON.stringify({ type: "error", message }),
+      JSON.stringify({ type: "turn.failed", error: { message } }),
+    ].join("\n");
+    expect(classifyCodexAuthRefreshFailure({ stdout })).toBe(expected);
+  });
+
+  it("uses the final protocol failure rather than a recovered earlier error", () => {
+    const stdout = [
+      JSON.stringify({ type: "error", message: "refresh_token_expired" }),
+      JSON.stringify({ type: "turn.failed", error: { message: "Unrelated provider failure" } }),
+    ].join("\n");
+    expect(classifyCodexAuthRefreshFailure({ stdout })).toBeNull();
+  });
+
+  it("ignores quoted auth errors when the protocol stops without a terminal error", () => {
+    const stdout = JSON.stringify({
+      type: "item.completed",
+      item: { type: "command_execution", aggregated_output: "Invalid or expired refresh token" },
+    });
+    expect(classifyCodexAuthRefreshFailure({ stdout, stderr: "Process terminated unexpectedly" })).toBeNull();
+  });
+
+  it("retains a real stderr auth failure after protocol output", () => {
+    const stdout = JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: "Application error: refresh_token_reused" },
+    });
+    expect(classifyCodexAuthRefreshFailure({ stdout, stderr: "OAuth failed: refresh token has expired" })).toBe(
+      "refresh_token_expired",
+    );
+  });
 });
 
 describe("isCodexUnknownSessionError", () => {
@@ -230,6 +290,42 @@ describe("isCodexTransientUpstreamError", () => {
     );
   });
 
+  it("extracts the retry time from the subscription usage-limit wording", () => {
+    // ChatGPT Plus wording reported in #15613: no model name, no
+    // "switch to another model" clause, and a zone-less local reset clock.
+    const errorMessage = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 8:13 PM.";
+    const now = new Date(2026, 9, 8, 19, 45, 0);
+
+    expect(isCodexProviderQuotaError({ errorMessage })).toBe(true);
+    expect(extractCodexRetryNotBefore({ errorMessage }, now)?.getTime()).toBe(
+      new Date(2026, 9, 8, 20, 13, 0, 0).getTime(),
+    );
+  });
+
+  it("rolls a past subscription reset clock to the next local day", () => {
+    const errorMessage = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 8:13 PM.";
+    const now = new Date(2026, 9, 8, 21, 0, 0);
+
+    expect(extractCodexRetryNotBefore({ errorMessage }, now)?.getTime()).toBe(
+      new Date(2026, 9, 9, 20, 13, 0, 0).getTime(),
+    );
+  });
+
+  it("parses an explicit timezone hint on the subscription wording", () => {
+    const errorMessage = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 11:31 PM (America/Chicago).";
+    const now = new Date("2026-04-23T03:29:02.000Z");
+
+    expect(extractCodexRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe(
+      "2026-04-23T04:31:00.000Z",
+    );
+  });
+
+  it("returns no retry time for the subscription wording without a clock", () => {
+    const errorMessage = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro) to keep going.";
+
+    expect(extractCodexRetryNotBefore({ errorMessage })).toBeNull();
+  });
+
   it("classifies model-capacity messages as provider quota without reset metadata", () => {
     const errorMessage = "The requested model is at capacity. Please try again later.";
 
@@ -263,4 +359,18 @@ describe("isCodexTransientUpstreamError", () => {
       }),
     ).toBe(false);
   });
+  it("uses a fixed non-UTC host timezone for zone-less subscription reset clocks", () => {
+    const moduleUrl = new URL("./parse.ts", import.meta.url).href;
+    const loader = new URL("../../../../../server/node_modules/tsx/dist/loader.mjs", import.meta.url).href;
+    const code = `import {extractCodexRetryNotBefore} from ${JSON.stringify(moduleUrl)};
+      const input={errorMessage:"You've hit your usage limit. Upgrade to Pro, or try again at 8:13 PM."};
+      process.stdout.write(JSON.stringify({offset:new Date("2026-10-09T02:45:00Z").getTimezoneOffset(),
+        today:extractCodexRetryNotBefore(input,new Date("2026-10-09T02:45:00Z"))?.toISOString(),
+        tomorrow:extractCodexRetryNotBefore(input,new Date("2026-10-09T04:00:00Z"))?.toISOString()}));`;
+    const output = execFileSync(process.execPath, ["--import", loader, "--input-type=module", "-e", code], {
+      env: { ...process.env, TZ: "America/Los_Angeles" }, encoding: "utf8", timeout: 10000,
+    });
+    expect(JSON.parse(output)).toEqual({ offset: 420, today: "2026-10-09T03:13:00.000Z", tomorrow: "2026-10-10T03:13:00.000Z" });
+  });
+
 });
