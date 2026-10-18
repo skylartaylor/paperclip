@@ -826,4 +826,52 @@ describe("HTTP logger redaction", () => {
       });
     },
   );
+  it.each([200, 400, 500])("redacts Cloudflare Access credentials and identity in real HTTP %i logs", async status => {
+    const chunks: string[] = [];
+    const stream = new Writable({ write(chunk, _encoding, callback) { chunks.push(chunk.toString()); callback(); } });
+    const app = express();
+    app.use(createHttpLogger(pino({ redact: [...HTTP_LOG_REDACT_PATHS] }, stream)));
+    app.get("/api/redaction-probe", (_req, res) => { res.status(status).json({ ok: status === 200 }); });
+    await request(app).get("/api/redaction-probe")
+      .set("Cf-Access-Jwt-Assertion", "cloudflare-jwt-canary")
+      .set("Cf-Access-Authenticated-User-Email", "cloudflare-user-canary@example.test");
+    await new Promise(resolve => setImmediate(resolve));
+    const output = chunks.join("");
+    expect(output).not.toContain("cloudflare-jwt-canary");
+    expect(output).not.toContain("cloudflare-user-canary");
+    expect(JSON.parse(chunks[0]).req.headers["cf-access-jwt-assertion"]).toBe("[Redacted]");
+  });
+
+  it("redacts a credentialValues envelope at the serialization boundary", async () => {
+    const chunks: string[] = [];
+    const stream = new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString());
+        callback();
+      },
+    });
+    const logger = pino({ redact: [...HTTP_LOG_REDACT_PATHS] }, stream);
+
+    // No recursive redactor runs here on purpose: this exercises the path list
+    // as the backstop it is documented to be. fast-redact's censor is
+    // "[Redacted]" (pino's default), not redactSensitive's "[REDACTED]", so
+    // assert the secret is gone rather than pinning the marker.
+    logger.error(
+      {
+        errorContext: { name: "Error", message: "OAuth authorization expired." },
+        reqBody: {
+          galleryKey: "github",
+          name: "GitHub",
+          credentialValues: { "credentials.authorization": "github_pat_canary" },
+        },
+        reqParams: {},
+      },
+      "POST /api/companies/company-1/tools/apps/connect 502 — OAuth authorization expired.",
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const output = chunks.join("");
+    expect(output).not.toContain("github_pat_canary");
+    expect(output).toContain('"galleryKey":"github"');
+  });
 });

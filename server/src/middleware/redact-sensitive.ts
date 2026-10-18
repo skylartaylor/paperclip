@@ -12,6 +12,8 @@
 // the logger.
 
 const SENSITIVE_KEYS = new Set<string>([
+  // Connector credential maps use arbitrary caller-chosen leaf names.
+  "credentialvalues",
   // Provider setup payloads deliberately group all durable authentication
   // material under `credentials`. Redact the whole subtree instead of trying
   // to keep an ever-changing allowlist of provider-specific field names in

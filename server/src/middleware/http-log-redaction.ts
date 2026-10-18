@@ -11,6 +11,9 @@ export const HTTP_LOG_REDACT_PATHS = [
   'req.headers["x-csrf-token"]',
   'req.headers["x-xsrf-token"]',
   'req.headers["x-api-key"]',
+  // Cloudflare Access assertions are bearer credentials; email is identity data.
+  'req.headers["cf-access-jwt-assertion"]',
+  'req.headers["cf-access-authenticated-user-email"]',
   // Cloud proxy credentials and signed assertions authorize tenant access.
   'req.headers["x-paperclip-cloud-tenant-token"]',
   'req.headers["x-paperclip-cloud-session-id"]',
@@ -27,5 +30,11 @@ export const HTTP_LOG_REDACT_PATHS = [
   // at the final serialization boundary in case a future custom serializer
   // bypasses the recursive redactor.
   "reqBody.credentials",
+  // The app-connect/reconnect body groups every provider credential under
+  // `credentialValues`: a map of provider config paths
+  // (`credentials.authorization`, `headers.X-Api-Key`) to the secret string for
+  // each. The key names are chosen by the caller, so no fixed list of leaf
+  // names can cover them. Redact the whole envelope instead.
+  "reqBody.credentialValues",
   "errorContext.details.credentials",
 ] as const;
