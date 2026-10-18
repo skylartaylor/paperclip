@@ -1287,6 +1287,8 @@ describe("Layout", () => {
 
 describe("Layout mobile keyboard handling", () => {
   let container: HTMLDivElement;
+  let frameId = 0;
+  const pendingFrames = new Map<number, FrameRequestCallback>();
 
   // iOS reports the software keyboard only through visualViewport: innerHeight,
   // 100vh and 100dvh all keep their full value, so anything docked to the bottom
@@ -1307,10 +1309,12 @@ describe("Layout mobile keyboard handling", () => {
     },
   };
 
-  /** The keyboard hook defers to rAF, which jsdom runs on a ~16ms timer. */
+  /** Flush measured viewport updates deterministically, even on a busy host. */
   async function flushFrame() {
     await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 32));
+      const callbacks = [...pendingFrames.values()];
+      pendingFrames.clear();
+      for (const callback of callbacks) callback(performance.now());
     });
   }
 
@@ -1327,6 +1331,13 @@ describe("Layout mobile keyboard handling", () => {
   }
 
   beforeEach(() => {
+    pendingFrames.clear();
+    frameId = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      pendingFrames.set(++frameId, callback);
+      return frameId;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => { pendingFrames.delete(id); });
     container = document.createElement("div");
     document.body.appendChild(container);
     currentPathname = "/PAP/issues/PAP-1";
@@ -1367,6 +1378,8 @@ describe("Layout mobile keyboard handling", () => {
   });
 
   afterEach(() => {
+    pendingFrames.clear();
+    vi.unstubAllGlobals();
     delete (document.documentElement as { scrollHeight?: number }).scrollHeight;
     delete (document.documentElement as { clientHeight?: number }).clientHeight;
     container.remove();

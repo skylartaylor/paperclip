@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useKeyboardInset } from "./useKeyboardInset";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -9,6 +9,8 @@ import { useKeyboardInset } from "./useKeyboardInset";
 let result = 0;
 let root: Root;
 let host: HTMLDivElement;
+let frameId = 0;
+const pendingFrames = new Map<number, FrameRequestCallback>();
 
 function Harness({ enabled = true }: { enabled?: boolean }) {
   result = useKeyboardInset(enabled);
@@ -33,10 +35,12 @@ const viewport = {
   },
 };
 
-/** The hook defers to rAF, which jsdom runs on a ~16ms timer. */
+/** Flush viewport measurement without depending on wall-clock scheduling. */
 async function flush() {
   await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 32));
+    const callbacks = [...pendingFrames.values()];
+    pendingFrames.clear();
+    for (const callback of callbacks) callback(performance.now());
   });
 }
 
@@ -57,6 +61,13 @@ async function resizeViewport(height: number, offsetTop = 0) {
 }
 
 beforeEach(async () => {
+  pendingFrames.clear();
+  frameId = 0;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    pendingFrames.set(++frameId, callback);
+    return frameId;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => { pendingFrames.delete(id); });
   viewport.height = 800;
   viewport.offsetTop = 0;
   viewport.scale = 1;
@@ -75,6 +86,7 @@ afterEach(async () => {
     root.unmount();
   });
   host.remove();
+  vi.unstubAllGlobals();
 });
 
 describe("useKeyboardInset", () => {
