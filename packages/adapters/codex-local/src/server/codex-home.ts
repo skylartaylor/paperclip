@@ -289,9 +289,16 @@ function buildManagedMcpBlock(input: {
   gateways: ManagedCodexMcpGateway[];
   apiBaseUrl: string;
   existingNames: Set<string>;
+  githubPluginBridge?: { agentId: string; scriptPath: string };
 }): { block: string; warnings: string[] } {
   const warnings: string[] = [];
   const usedNames = new Set<string>();
+  if (input.githubPluginBridge) {
+    if (input.existingNames.has("paperclip_github")) {
+      throw new Error("Unmanaged paperclip_github MCP server conflicts with the managed GitHub bridge");
+    }
+    usedNames.add("paperclip_github");
+  }
   const lines = [
     MANAGED_MCP_BLOCK_START,
     "# Written by Paperclip for governed MCP gateway access. Do not edit this block by hand.",
@@ -319,6 +326,18 @@ function buildManagedMcpBlock(input: {
       `http_headers = { Authorization = ${tomlString(`Bearer ${gateway.bearerToken}`)} }`,
     );
   });
+  if (input.githubPluginBridge) {
+    lines.push(
+      "", '[mcp_servers.paperclip_github]',
+      'command = "/usr/bin/python3"',
+      `args = ${JSON.stringify([input.githubPluginBridge.scriptPath, "--coordinator-id", input.githubPluginBridge.agentId])}`,
+      'env_vars = ["PAPERCLIP_API_KEY", "PAPERCLIP_AGENT_ID", "PAPERCLIP_COMPANY_ID", "PAPERCLIP_RUN_ID", "PAPERCLIP_TASK_ID"]',
+      'enabled_tools = ["discover_github_tools", "get_linked_issue", "get_linked_comments", "prepare_issue_comment"]',
+      // This removes only the redundant provider prompt for this fixed facade.
+      // Paperclip's authenticated gateway still enforces native human approval.
+      'default_tools_approval_mode = "auto"',
+    );
+  }
   lines.push(MANAGED_MCP_BLOCK_END);
   return { block: lines.join("\n"), warnings };
 }
@@ -327,6 +346,7 @@ export async function writeManagedCodexMcpConfig(input: {
   codexHome: string;
   apiBaseUrl: string;
   gateways: ManagedCodexMcpGateway[];
+  githubPluginBridge?: { agentId: string; scriptPath: string };
 }): Promise<{ configPath: string; warnings: string[] }> {
   const configPath = path.join(input.codexHome, "config.toml");
   await fs.mkdir(input.codexHome, { recursive: true });
@@ -339,8 +359,9 @@ export async function writeManagedCodexMcpConfig(input: {
     gateways: input.gateways,
     apiBaseUrl: input.apiBaseUrl,
     existingNames: readCodexMcpServerNames(unmanagedConfig),
+    githubPluginBridge: input.githubPluginBridge,
   });
-  const next = input.gateways.length > 0
+  const next = input.gateways.length > 0 || input.githubPluginBridge
     ? `${unmanagedConfig}${unmanagedConfig ? "\n\n" : ""}${block}\n`
     : `${unmanagedConfig}${unmanagedConfig ? "\n" : ""}`;
   await fs.writeFile(configPath, next, { mode: 0o600 });

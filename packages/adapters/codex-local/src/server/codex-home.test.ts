@@ -1033,6 +1033,36 @@ describe("evaluateCodexCredentialReadiness", () => {
     }
   });
 
+  it("writes and removes the first-party GitHub bridge without CLI auth overrides or credential values", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-github-mcp-"));
+    try {
+      await writeManagedCodexMcpConfig({ codexHome: home, apiBaseUrl: "http://127.0.0.1:3100", gateways: [],
+        githubPluginBridge: { agentId: "coordinator-fixture", scriptPath: "/fixture/paperclip-github-mcp.py" } });
+      const config = await fs.readFile(path.join(home, "config.toml"), "utf8");
+      expect(config).toContain("[mcp_servers.paperclip_github]");
+      expect(config).toContain('command = "/usr/bin/python3"');
+      expect(config).toContain('args = ["/fixture/paperclip-github-mcp.py","--coordinator-id","coordinator-fixture"]');
+      expect(config).toContain('"PAPERCLIP_RUN_ID", "PAPERCLIP_TASK_ID"');
+      expect(config).toContain('default_tools_approval_mode = "auto"');
+      expect(config).toContain('"prepare_issue_comment"');
+      expect(config).not.toContain("Bearer");
+      expect(config).not.toContain("approval_policy");
+      await writeManagedCodexMcpConfig({ codexHome: home, apiBaseUrl: "http://127.0.0.1:3100", gateways: [] });
+      expect(await fs.readFile(path.join(home, "config.toml"), "utf8")).not.toContain("paperclip_github");
+    } finally { await fs.rm(home, { recursive: true, force: true }); }
+  });
+
+  it("refuses to replace an unmanaged GitHub MCP server", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-github-mcp-collision-"));
+    try {
+      const before = '[mcp_servers.paperclip_github]\ncommand = "user-owned-fixture"\n';
+      await fs.writeFile(path.join(home, "config.toml"), before);
+      await expect(writeManagedCodexMcpConfig({ codexHome: home, apiBaseUrl: "http://127.0.0.1:3100", gateways: [],
+        githubPluginBridge: { agentId: "coordinator-fixture", scriptPath: "/fixture/paperclip-github-mcp.py" } })).rejects.toThrow("Unmanaged paperclip_github");
+      expect(await fs.readFile(path.join(home, "config.toml"), "utf8")).toBe(before);
+    } finally { await fs.rm(home, { recursive: true, force: true }); }
+  });
+
   it("restricts permissions on an existing managed MCP config", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-config-"));
     try {

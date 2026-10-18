@@ -118,7 +118,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     );
   }
 
-  async function runTeardown(input: { sandboxAuth: string; hostAuth: string; onProviderStopped?: () => Promise<void>; withIdentity?: boolean }) {
+  async function runTeardown(input: { sandboxAuth: string; hostAuth: string; onProviderStopped?: () => Promise<void>; withIdentity?: boolean; localGitHub?: boolean }) {
     const rootDir = await mkdtemp(
       path.join(os.tmpdir(), "paperclip-codex-copyback-e2e-"),
     );
@@ -157,6 +157,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
       config: {
         command: "codex",
         engine: "cli",
+        ...(input.localGitHub ? { githubPluginMcp: true } : {}),
         // External CODEX_HOME (outside the managed company tree) so no managed
         // seeding rewrites auth.json before teardown; equals the shared host home.
         env: { CODEX_HOME: sharedHostHome, ...(input.withIdentity ? { MY_SERVICE_TOKEN: "assigned-tool-token" } : {}) },
@@ -167,7 +168,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
           source: "project_primary",
         },
       },
-      executionTransport: {
+      executionTransport: input.localGitHub ? undefined : {
         remoteExecution: {
           host: "127.0.0.1",
           port: 2222,
@@ -184,11 +185,20 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
 
     return {
       commandArgs,
+      managedConfig: await readFile(path.join(sharedHostHome, "config.toml"), "utf8"),
       finalHostAuth: await readFile(hostAuthPath, "utf8"),
       finalHostMode: (await lstat(hostAuthPath)).mode & 0o777,
       executionResult,
     };
   }
+
+  it("wires the local GitHub bridge through managed MCP config rather than custom CLI overrides", async () => {
+    const { commandArgs, managedConfig } = await runTeardown({ sandboxAuth: "{}", hostAuth: "{}", localGitHub: true });
+    expect(managedConfig).toContain("[mcp_servers.paperclip_github]");
+    expect(managedConfig).toContain("paperclip-github-mcp.py");
+    expect(managedConfig).toContain("PAPERCLIP_API_KEY");
+    expect(commandArgs.join(" ")).not.toContain("mcp_servers.paperclip_github");
+  });
 
   it("keeps identity and scoped API access without exposing configured service tokens to CLI shells", async () => {
     vi.stubEnv("DATABASE_URL", "postgres://operator:host-password@host/private");

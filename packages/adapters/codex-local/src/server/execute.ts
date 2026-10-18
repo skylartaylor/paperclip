@@ -791,10 +791,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       runtimeMcpGateways,
       managedMcpGatewaysFromContext(context),
     );
+    const githubPluginMcp = config.githubPluginMcp === true;
+    const githubBridgePath = fileURLToPath(new URL("../../../../../scripts/paperclip-github-mcp.py", import.meta.url));
+    if (githubPluginMcp) {
+      if (executionTargetIsRemote || process.platform === "win32") {
+        throw new Error("The installed GitHub MCP bridge requires a local Unix execution target");
+      }
+      await fs.access(githubBridgePath);
+    }
     const managedMcp = await writeManagedCodexMcpConfig({
       codexHome: effectiveCodexHome,
       apiBaseUrl: paperclipBaseEnv.PAPERCLIP_API_URL,
       gateways: managedMcpGateways,
+      ...(githubPluginMcp ? {
+        githubPluginBridge: {
+          agentId: agent.id,
+          scriptPath: githubBridgePath,
+        },
+      } : {}),
     });
     if (managedMcpGateways.length > 0) {
       await onLog(
