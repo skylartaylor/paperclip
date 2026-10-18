@@ -100,6 +100,17 @@
       "head": "789caf6336139f9e947b34a22653923d651ba38d",
       "base": "0f14d261233c545aa6a8a38ec253c498a5130fff",
       "rationale": "Restore mobile task assignee control and desktop popover triggering. Adapted to current preferences; prevent Radix and React search autofocus for mobile/touch tablet interaction."
+    },
+    {
+      "pr": 15019,
+      "url": "https://github.com/paperclipai/paperclip/pull/15019",
+      "head": "84defd0b25c9b411e8e9c0667b04c41952b01353",
+      "commits": [
+        "e6c41025eb795b0f179e09f7a14d899a834c35a9",
+        "84defd0b25c9b411e8e9c0667b04c41952b01353"
+      ],
+      "author": "Riley Sheehan",
+      "rationale": "Re-admit handoffs blocked by outgoing workspace lease cleanup through ordinary admission; atomic deduplication, bounded restart retry, stage and ownership checks. Qualified against the locally observed review-stage race."
     }
   ],
   "held_candidates": {
