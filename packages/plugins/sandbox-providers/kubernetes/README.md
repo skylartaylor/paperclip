@@ -178,3 +178,42 @@ To run the kind-cluster integration test (requires `kubectl --context kind-paper
 ```bash
 RUN_K8S_INTEGRATION_TESTS=1 pnpm test test/integration/end-to-end-run.test.ts
 ```
+
+### Retained Rust workspaces (self-hosted)
+
+`persistentStorage: { claimName, cacheKey }` opts a **sandbox-cr** environment
+into an operator-provisioned filesystem PVC. `/workspace` and Cargo's `/cargo`
+(home and target) survive lease release, pod replacement and worker restart.
+Adapter HOME stays ephemeral; do not put authentication files in the cache.
+The claim must be Bound, have no owner references, and carry these labels:
+
+- `paperclip.io/managed-by: paperclip-k8s-plugin`
+- `paperclip.io/company-id: <company ID>`
+- `paperclip.io/environment-id: <environment ID>`
+
+Its matching PV must have `Retain` reclaim policy and a matching claim UID.
+The plugin never creates or deletes claims/PVs. Reserve storage before provisioning
+and use an actual bounded filesystem/backend: local-path claim size is not a
+physical disk quota. Keep existing host jobs, VM reservations and volumes intact.
+
+A durable ConfigMap lock admits one writer per claim. Pending and terminating
+pods prevent reuse. Release/destroy marks the lock released; a later acquire can
+reclaim it only after the old Sandbox and all claim-mounting pods are absent.
+There is no lock TTL: age is not evidence that a compiler has stopped. Failed or
+ambiguous cleanup retains the lock. An interrupted acquisition whose lease was
+never saved may require operator recovery after verifying its holder, CR and pod
+absence; never delete an unknown holder's lock to force a run through.
+
+Use one environment/claim per independently writable task workspace. Choose a
+stable cache key for the pinned image/toolchain/target ABI; changing it creates a
+separate Cargo cache on that claim. Concurrent checkouts must not share a writable
+target directory. Do not mount a host home or a live host Cargo target.
+
+`defaultResources`, `resourceQuota` and `adapters` are now exposed in the provider
+configuration schema. A conservative shared-host starting point is one pod,
+two CPUs and 8 GiB RAM; account separately for RuntimeClass overhead in namespace
+quotas. Existing operator quotas remain unchanged. The Sandbox backend now sets
+an absolute shutdown time, active pod deadline and absolute entrypoint deadline;
+`podActivityDeadlineSec` applies to it as well as Jobs. Requested login deadlines
+are capped at or before the request. This does not add managed login PTY support.
+Test real adapter login/callback connectivity before assigning production agents.

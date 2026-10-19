@@ -28,6 +28,8 @@ export interface BuildSandboxCrManifestInput {
     requests?: { cpu?: string; memory?: string };
     limits?: { cpu?: string; memory?: string };
   };
+  expiresAt?: string;
+  persistentStorage?: { claimName: string; cacheKey: string };
   runtimeClassName?: string;
   imagePullSecrets?: string[];
 }
@@ -50,11 +52,15 @@ export function buildSandboxCrManifest(
       // explicit delete.
     },
     spec: {
+      ...(input.expiresAt ? { shutdownTime: input.expiresAt, shutdownPolicy: "Delete" } : {}),
       podTemplate: {
         metadata: {
           labels: podLabels,
         },
         spec: {
+          ...(input.expiresAt ? {
+            activeDeadlineSeconds: Math.max(1, Math.floor((Date.parse(input.expiresAt) - Date.now()) / 1000)),
+          } : {}),
           serviceAccountName: input.serviceAccountName,
           // Agent containers call back to paperclip-server via HTTPS egress;
           // they never call the Kubernetes API, so mounting an SA token is
@@ -81,6 +87,16 @@ export function buildSandboxCrManifest(
             fsGroupChangePolicy: "OnRootMismatch",
             seccompProfile: { type: "RuntimeDefault" },
           },
+          ...(input.persistentStorage ? {
+            initContainers: [{
+              name: "prepare-storage", image: input.image,
+              command: ["/bin/sh", "-ec", `mkdir -p /persist/workspace /persist/cargo/${input.persistentStorage.cacheKey}/home /persist/cargo/${input.persistentStorage.cacheKey}/target`],
+              volumeMounts: [{ name: "persistent", mountPath: "/persist" }],
+              securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000,
+                readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } },
+              resources: { requests: { cpu: "100m", memory: "128Mi", "ephemeral-storage": "32Mi" }, limits: { cpu: "100m", memory: "128Mi", "ephemeral-storage": "64Mi" } },
+            }],
+          } : {}),
           containers: [
             {
               name: "agent",
@@ -94,13 +110,20 @@ export function buildSandboxCrManifest(
                 "--",
                 "/bin/sh",
                 "-c",
-                "sleep infinity",
+                input.expiresAt
+                  ? `remaining=$((${Math.floor(Date.parse(input.expiresAt) / 1000)} - $(date +%s))); [ "$remaining" -gt 0 ] && exec sleep "$remaining"; exit 0`
+                  : "sleep infinity",
               ],
               // HOME must point at a writable mount; the image's default
                // HOME=/home/node is inside the readOnly root filesystem.
                // Claude (and most agent runtimes) silently exit with code 0
                // and no output when HOME is unwritable, so set this explicitly.
-              env: [{ name: "HOME", value: "/home/paperclip" }],
+              env: [{ name: "HOME", value: "/home/paperclip" },
+                ...(input.persistentStorage ? [
+                  { name: "CARGO_HOME", value: "/cargo/home" },
+                  { name: "CARGO_TARGET_DIR", value: "/cargo/target" },
+                ] : []),
+              ],
               envFrom: [{ secretRef: { name: input.envSecretName } }],
               securityContext: {
                 runAsNonRoot: true,
@@ -111,17 +134,24 @@ export function buildSandboxCrManifest(
                 capabilities: { drop: ["ALL"] },
               },
               resources: {
-                requests: input.resources.requests ?? {
+                requests: {
                   cpu: "250m",
                   memory: "512Mi",
+                  "ephemeral-storage": "2Gi",
+                  ...input.resources.requests,
                 },
-                limits: input.resources.limits ?? {
+                limits: {
                   cpu: "2",
                   memory: "4Gi",
+                  "ephemeral-storage": "4Gi",
+                  ...input.resources.limits,
                 },
               },
               volumeMounts: [
-                { name: "workspace", mountPath: "/workspace" },
+                ...(input.persistentStorage ? [
+                  { name: "persistent", mountPath: "/workspace", subPath: "workspace" },
+                  { name: "persistent", mountPath: "/cargo", subPath: `cargo/${input.persistentStorage.cacheKey}` },
+                ] : [{ name: "workspace", mountPath: "/workspace" }]),
                 { name: "home", mountPath: "/home/paperclip" },
                 { name: "cache", mountPath: "/home/paperclip/.cache" },
                 { name: "tmp", mountPath: "/tmp" },
@@ -129,7 +159,9 @@ export function buildSandboxCrManifest(
             },
           ],
           volumes: [
-            { name: "workspace", emptyDir: { sizeLimit: "8Gi" } },
+            ...(input.persistentStorage
+              ? [{ name: "persistent", persistentVolumeClaim: { claimName: input.persistentStorage.claimName } }]
+              : [{ name: "workspace", emptyDir: { sizeLimit: "8Gi" } }]),
             { name: "home", emptyDir: { sizeLimit: "1Gi" } },
             { name: "cache", emptyDir: { sizeLimit: "1Gi" } },
             { name: "tmp", emptyDir: { sizeLimit: "2Gi" } },

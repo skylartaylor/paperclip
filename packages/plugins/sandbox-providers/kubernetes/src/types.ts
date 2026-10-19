@@ -27,6 +27,16 @@ export const kubernetesProviderConfigSchema = z
       })
       .optional(),
 
+    // Claims are provisioned by the operator, never created/deleted by the worker.
+    persistentStorage: z.object({
+      claimName: z.string().regex(/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/),
+      cacheKey: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,62}$/),
+    }).strict().optional(),
+    resourceQuota: z.object({
+      pods: z.string().regex(/^[1-9][0-9]*$/),
+      requestsCpu: z.string().min(1), requestsMemory: z.string().min(1),
+      limitsCpu: z.string().min(1), limitsMemory: z.string().min(1),
+    }).strict().optional(),
     runtimeClassName: z.string().optional(),
     serviceAccountAnnotations: z.record(z.string()).default({}),
 
@@ -66,6 +76,9 @@ export const kubernetesProviderConfigSchema = z
      *   installed, or when you need stable (non-alpha) k8s APIs.
      */
     backend: z.enum(["sandbox-cr", "job"]).default("sandbox-cr"),
+  })
+  .refine((cfg) => !cfg.persistentStorage || cfg.backend === "sandbox-cr", {
+    message: "persistentStorage requires the sandbox-cr backend",
   })
   .refine(
     (cfg) => cfg.inCluster || cfg.kubeconfig,

@@ -28,6 +28,7 @@ import { getAdapterDefaults, buildAdapterEnv, resolveRunAdapterType } from "./ad
 import { resolveImage } from "./image-allowlist.js";
 import { buildJobManifest } from "./pod-spec-builder.js";
 import { buildSandboxCrManifest } from "./sandbox-cr-builder.js";
+import { acquirePersistentStorage, markPersistentStorageReleased } from "./persistent-storage.js";
 import { ensureTenant } from "./tenant-orchestrator.js";
 import { createPerRunSecret } from "./secret-manager.js";
 import { FastUploadInterceptor } from "./upload-interceptor.js";
@@ -300,6 +301,11 @@ const plugin = definePlugin({
     },
   ): Promise<PluginEnvironmentLease> {
     const config = kubernetesProviderConfigSchema.parse(params.config);
+    const requestedMs = params.requestedExpiresAt ? Date.parse(params.requestedExpiresAt) : Infinity;
+    const expiresMs = Math.floor(Math.min(Date.now() + config.podActivityDeadlineSec * 1000, requestedMs) / 1000) * 1000;
+    if (!Number.isFinite(expiresMs) || expiresMs < Date.now() + 1000) throw new Error("Sandbox deadline is invalid or too close");
+    if (params.requestedExpiresAt && config.backend !== "sandbox-cr") throw new Error("Bounded login leases require sandbox-cr");
+    const expiresAt = new Date(expiresMs).toISOString();
     const namespace = deriveTenantNamespace(config, params.companyId);
 
     // The adapter for THIS run is the agent's adapter (params.adapterType) when
@@ -344,7 +350,7 @@ const plugin = definePlugin({
       egressMode: config.egressMode,
       egressAllowFqdns: [...adapterDefaults.allowFqdns, ...config.egressAllowFqdns],
       egressAllowCidrs: config.egressAllowCidrs,
-      resourceQuota: DEFAULT_RESOURCE_QUOTA,
+      resourceQuota: config.resourceQuota ?? DEFAULT_RESOURCE_QUOTA,
     });
 
     const jobName = `pc-${newRunUlidDns()}`;
@@ -373,6 +379,8 @@ const plugin = definePlugin({
       ? buildSandboxCrManifest({
           namespace,
           sandboxName: jobName,
+          persistentStorage: config.persistentStorage,
+          expiresAt,
           adapterType: effectiveAdapterType,
           image,
           envSecretName: secretName,
@@ -397,6 +405,12 @@ const plugin = definePlugin({
           imagePullSecrets: config.imagePullSecrets,
         });
 
+    const storageOwner = config.persistentStorage ? {
+      namespace, companyId: params.companyId, environmentId: params.environmentId,
+      claimName: config.persistentStorage.claimName, workloadName: jobName,
+    } : null;
+    if (storageOwner) await acquirePersistentStorage(clients, storageOwner);
+    try {
     const { uid: ownerUid } = await orchestrator.claim(clients, namespace, manifest);
     const scopedNetworkEgress = parseScopedNetworkEgressGrant(params.executionWorkspaceSettings);
     const scopedNetworkPolicyName = await createScopedNetworkEgressPolicyOrReleaseWorkload(
@@ -464,8 +478,22 @@ const plugin = definePlugin({
 
     return {
       providerLeaseId: jobName,
-      metadata: leaseMetadata as unknown as Record<string, unknown>,
+      expiresAt: isSandboxCrBackend ? expiresAt : null,
+      metadata: { ...leaseMetadata, storageOwner, expiresAt: isSandboxCrBackend ? expiresAt : null } as unknown as Record<string, unknown>,
     };
+    } catch (error) {
+      // Deletion must succeed (or be known absent) before marking the lock
+      // released. Network/permission uncertainty keeps it locked, fail closed.
+      try {
+        await orchestrator.release(clients, namespace, jobName);
+      } catch (cleanupError) {
+        const status = (cleanupError as { code?: number; statusCode?: number }).code
+          ?? (cleanupError as { statusCode?: number }).statusCode;
+        if (status !== 404) throw new AggregateError([error, cleanupError], "Lease setup and cleanup failed; storage remains locked");
+      }
+      if (storageOwner) await markPersistentStorageReleased(clients, storageOwner);
+      throw error;
+    }
   },
 
   async onEnvironmentResumeLease(
@@ -492,6 +520,19 @@ const plugin = definePlugin({
       kubeconfig: config.kubeconfig,
     });
     const clients = makeKubeClients(kc);
+
+    const expiry = params.leaseMetadata?.expiresAt;
+    if (typeof expiry === "string" && (!Number.isFinite(Date.parse(expiry)) || Date.parse(expiry) <= Date.now())) {
+      await destroyLeaseResources(clients, { namespace, name: params.providerLeaseId,
+        backend: leaseBackend, podName: typeof params.leaseMetadata?.podName === "string" ? params.leaseMetadata.podName : null, secretName });
+      if (params.leaseMetadata?.storageOwner) {
+        await markPersistentStorageReleased(clients, {
+          ...(params.leaseMetadata.storageOwner as Parameters<typeof markPersistentStorageReleased>[1]),
+          namespace, companyId: params.companyId, environmentId: params.environmentId, workloadName: params.providerLeaseId,
+        });
+      }
+      return { providerLeaseId: null, metadata: { expired: true, reason: "Sandbox deadline passed" } };
+    }
 
     const check = await checkLeaseResumable(clients, {
       namespace,
@@ -543,8 +584,11 @@ const plugin = definePlugin({
 
     return {
       providerLeaseId: params.providerLeaseId,
+      expiresAt: typeof params.leaseMetadata?.expiresAt === "string" ? params.leaseMetadata.expiresAt : null,
       metadata: {
         ...leaseMetadata,
+        storageOwner: params.leaseMetadata?.storageOwner ?? null,
+        expiresAt: params.leaseMetadata?.expiresAt ?? null,
         resumedLease: true,
       } as unknown as Record<string, unknown>,
     };
@@ -606,6 +650,10 @@ const plugin = definePlugin({
         ?? (err as { code?: number; statusCode?: number }).statusCode;
       if (code !== 404) throw err;
     }
+    if (params.leaseMetadata?.storageOwner) {
+      await markPersistentStorageReleased(clients, { ...(params.leaseMetadata.storageOwner as Parameters<typeof markPersistentStorageReleased>[1]),
+        namespace, companyId: params.companyId, environmentId: params.environmentId, workloadName: params.providerLeaseId });
+    }
   },
 
   async onEnvironmentDestroyLease(
@@ -651,6 +699,10 @@ const plugin = definePlugin({
       podName,
       secretName,
     });
+    if (params.leaseMetadata?.storageOwner) {
+      await markPersistentStorageReleased(clients, { ...(params.leaseMetadata.storageOwner as Parameters<typeof markPersistentStorageReleased>[1]),
+        namespace, companyId: params.companyId, environmentId: params.environmentId, workloadName: params.providerLeaseId });
+    }
   },
 
   async onEnvironmentExecute(

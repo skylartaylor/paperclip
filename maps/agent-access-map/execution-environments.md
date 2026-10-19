@@ -52,6 +52,15 @@ invalidation and restricted-reader redaction; actual agent-denial proof remains
 not run. Company/team packages do not import or export environment rows, so those
 packages do not transfer platform qualification.
 
+Scoped Kubernetes storage addition (2026-10-19): environment management stays
+operator-only. Provider `persistentStorage` references a pre-provisioned,
+company/environment-labelled filesystem PVC bound to a Retain PV. The provider
+uses a durable exclusive-writer lock; agent pods receive no Kubernetes token.
+No MCP environment-management or storage-administration operation is added.
+[Storage tests](../../packages/plugins/sandbox-providers/kubernetes/test/unit/persistent-storage.test.ts)
+cover ownership rejection, writer conflicts and retained-storage configuration;
+these do not certify the broader agent-management API or model login journey.
+
 ## `capabilities`
 
 Review: `baseline`.

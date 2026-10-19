@@ -81,6 +81,14 @@ Manual: Run a bounded command in the intended target, inspect its output and wor
 
 ## Gotchas
 
+- The Kubernetes provider can attach an explicitly provisioned retained PVC for
+  source and Cargo caches. Configure `persistentStorage` and conservative resource
+  limits as an operator; the default temporary volumes do not preserve caches.
+  See the [provider storage contract](../../packages/plugins/sandbox-providers/kubernetes/README.md#retained-rust-workspaces-self-hosted).
+  Qualification should replace the pod, verify warm artifact reuse, exercise the
+  writer lock and confirm deadline cleanup retains the PVC. A local-volume claim
+  size alone does not enforce physical disk capacity.
+
 - A probe is narrower evidence than a complete task with tools, files, and resumption.
 - Platform qualification does not authenticate a model account or qualify every
   harness; the selected native runtime still needs its own setup and useful-task proof.

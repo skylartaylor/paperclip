@@ -129,3 +129,13 @@ describe("plugin", () => {
     ).rejects.toThrow(/only supported on the sandbox-cr backend/);
   });
 });
+
+
+describe("bounded sandbox lease admission", () => {
+  it("rejects an invalid deadline before contacting Kubernetes", async () => {
+    await expect(plugin.definition.onEnvironmentAcquireLease!({ driverKey: "kubernetes", companyId: "co", environmentId: "env", runId: "run", config: { inCluster: true }, requestedExpiresAt: "not-a-date" })).rejects.toThrow(/deadline/);
+  });
+  it("rejects expired requests", async () => {
+    await expect(plugin.definition.onEnvironmentAcquireLease!({ driverKey: "kubernetes", companyId: "co", environmentId: "env", runId: "run", config: { inCluster: true }, requestedExpiresAt: "2000-01-01T00:00:00Z" })).rejects.toThrow(/deadline/);
+  });
+});

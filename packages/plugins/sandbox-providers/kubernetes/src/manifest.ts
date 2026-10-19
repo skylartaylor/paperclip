@@ -76,6 +76,39 @@ const manifest: PaperclipPluginManifestV1 = {
             enum: ["standard", "cilium"],
             description: "Network policy mode. `cilium` enables FQDN-based egress filtering via CiliumNetworkPolicy.",
           },
+          persistentStorage: {
+            type: "object", additionalProperties: false,
+            properties: {
+              claimName: { type: "string", pattern: "^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$" },
+              cacheKey: { type: "string", pattern: "^[a-z0-9][a-z0-9_-]{0,62}$" },
+            }, required: ["claimName", "cacheKey"],
+            description: "Pre-provisioned company/environment-owned retained PVC. One writer; persists /workspace and /cargo across sandbox replacement. sandbox-cr only.",
+          },
+          resourceQuota: {
+            type: "object", additionalProperties: false,
+            properties: {
+              pods: { type: "string", pattern: "^[1-9][0-9]*$" },
+              requestsCpu: { type: "string" }, requestsMemory: { type: "string" },
+              limitsCpu: { type: "string" }, limitsMemory: { type: "string" },
+            }, required: ["pods", "requestsCpu", "requestsMemory", "limitsCpu", "limitsMemory"],
+            description: "Initial namespace quota; existing operator quotas are preserved.",
+          },
+          defaultResources: {
+            type: "object", properties: {
+              requests: { type: "object", properties: { cpu: { type: "string" }, memory: { type: "string" } } },
+              limits: { type: "object", properties: { cpu: { type: "string" }, memory: { type: "string" } } },
+            },
+          },
+          adapters: {
+            type: "array", items: { type: "object", properties: {
+              adapterType: { type: "string" }, enabled: { type: "boolean" }, runtimeImage: { type: "string" },
+              envKeys: { type: "array", items: { type: "string" } },
+              allowFqdns: { type: "array", items: { type: "string" } },
+              probeCommand: { type: "array", items: { type: "string" } },
+              defaultEnv: { type: "object", additionalProperties: { type: "string" } },
+            }, required: ["adapterType"] },
+            description: "Explicit runtime registry; pin verified image digests and toolchains.",
+          },
           runtimeClassName: {
             type: "string",
             description:
