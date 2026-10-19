@@ -49,7 +49,7 @@ describe("onEnvironmentResumeLease", () => {
     expect(plugin.definition.onEnvironmentDestroyLease).toBeTypeOf("function");
   });
 
-  it("returns a valid lease handle for a live sandbox-cr lease", async () => {
+  it("resumes a sandbox-cr lease with fallback transfer for pre-workspace runtime assets", async () => {
     h.clients = {
       custom: {
         getNamespacedCustomObject: vi.fn().mockResolvedValue(readySandboxCr("pc-abc-pod")),
@@ -82,7 +82,7 @@ describe("onEnvironmentResumeLease", () => {
         backend: "sandbox-cr",
         resumedLease: true,
         // sandbox-cr has a pod-exec channel, so native file sync stays enabled.
-        nativeFileSyncUnsupported: false,
+        nativeFileSyncUnsupported: true,
       }),
     );
   });

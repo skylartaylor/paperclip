@@ -224,3 +224,12 @@ an absolute shutdown time, active pod deadline and absolute entrypoint deadline;
 `podActivityDeadlineSec` applies to it as well as Jobs. Requested login deadlines
 are capped at or before the request. This does not add managed login PTY support.
 Test real adapter login/callback connectivity before assigning production agents.
+
+### Managed runtime asset transfers
+
+Leases opt into the host's validated base64 transfer path. Managed runtime assets
+(such as ephemeral Codex authentication homes) can be staged before workspace
+realization and outside the workspace root. The optional streaming hooks remain
+workspace-confined and are not advertised for those leases. This compatibility
+choice trades transfer throughput for correct runtime staging without widening
+the streaming hooks' path permissions.

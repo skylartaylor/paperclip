@@ -470,10 +470,12 @@ const plugin = definePlugin({
       backend: config.backend,
       scopedNetworkPolicyName,
       scopedNetworkEgress,
-      // Native file sync streams over a pod exec; only the sandbox-cr backend
-      // exposes one. Flag the job backend so the server keeps the base64 fallback
-      // rather than routing its sync to a hook that would reject immediately.
-      nativeFileSyncUnsupported: config.backend !== "sandbox-cr",
+      // Managed runtime assets are staged before realizeWorkspace and may live
+      // outside its confinement root (for example an ephemeral Codex home).
+      // The workspace-only streaming hooks cannot serve that contract yet.
+      // Use the host's validated base64 transfer path without weakening the
+      // streaming hooks' path guards; both backends must advertise the fallback.
+      nativeFileSyncUnsupported: true,
     };
 
     return {
@@ -577,9 +579,9 @@ const plugin = definePlugin({
       scopedNetworkEgress: parseScopedNetworkEgressGrant({
         networkEgress: params.leaseMetadata?.scopedNetworkEgress,
       }),
-      // See acquireLease: only the sandbox-cr backend has a pod-exec channel for
-      // native sync, so a resumed job lease must keep the base64 fallback.
-      nativeFileSyncUnsupported: leaseBackend !== "sandbox-cr",
+      // Keep runtime-asset staging compatible after a worker/lease resume too.
+      // See acquireLease: workspace-only streaming cannot stage managed homes.
+      nativeFileSyncUnsupported: true,
     };
 
     return {
