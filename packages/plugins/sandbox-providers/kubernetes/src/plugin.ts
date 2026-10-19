@@ -407,7 +407,7 @@ const plugin = definePlugin({
 
     const storageOwner = config.persistentStorage ? {
       namespace, companyId: params.companyId, environmentId: params.environmentId,
-      claimName: config.persistentStorage.claimName, workloadName: jobName,
+      claimName: config.persistentStorage.claimName, volumeIdentity: config.persistentStorage.volumeIdentity, workloadName: jobName,
     } : null;
     if (storageOwner) await acquirePersistentStorage(clients, storageOwner);
     try {

@@ -181,10 +181,12 @@ RUN_K8S_INTEGRATION_TESTS=1 pnpm test test/integration/end-to-end-run.test.ts
 
 ### Retained Rust workspaces (self-hosted)
 
-`persistentStorage: { claimName, cacheKey }` opts a **sandbox-cr** environment
-into an operator-provisioned filesystem PVC. `/workspace` and Cargo's `/cargo`
-(home and target) survive lease release, pod replacement and worker restart.
-Adapter HOME stays ephemeral; do not put authentication files in the cache.
+`persistentStorage: { claimName, cacheKey, volumeIdentity }` opts a **sandbox-cr** environment
+into an operator-provisioned filesystem PVC. `/workspace`, Cargo registry/git
+downloads and `/cargo/target` survive lease release, pod replacement and worker
+restart. Cargo HOME stays ephemeral and mounts only the registry/git download
+subdirectories persistently, so `credentials.toml` is not retained. Adapter HOME
+also stays ephemeral; do not put authentication files in the workspace/cache.
 The claim must be Bound, have no owner references, and carry these labels:
 
 - `paperclip.io/managed-by: paperclip-k8s-plugin`
@@ -192,6 +194,11 @@ The claim must be Bound, have no owner references, and carry these labels:
 - `paperclip.io/environment-id: <environment ID>`
 
 Its matching PV must have `Retain` reclaim policy and a matching claim UID.
+Set PVC annotation `paperclip.io/storage-identity` to the configured UUID and
+write that same UUID into `.paperclip-storage-id` at the root of the mounted
+filesystem. The non-root init container verifies it before creating directories.
+Keep this marker on the actual filesystem, never in the underlying mountpoint:
+if a host mount fails, the empty fallback directory must fail initialization.
 The plugin never creates or deletes claims/PVs. Reserve storage before provisioning
 and use an actual bounded filesystem/backend: local-path claim size is not a
 physical disk quota. Keep existing host jobs, VM reservations and volumes intact.

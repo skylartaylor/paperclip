@@ -13,6 +13,7 @@ export interface StorageOwner {
   companyId: string;
   environmentId: string;
   claimName: string;
+  volumeIdentity: string;
   workloadName: string;
 }
 
@@ -33,6 +34,7 @@ export async function acquirePersistentStorage(clients: KubeClients, owner: Stor
   if (labels["paperclip.io/managed-by"] !== MANAGED
       || labels["paperclip.io/company-id"] !== owner.companyId
       || labels[OWNER] !== owner.environmentId
+      || pvc.metadata?.annotations?.["paperclip.io/storage-identity"] !== owner.volumeIdentity
       || pvc.metadata?.deletionTimestamp || pvc.metadata?.ownerReferences?.length
       || pvc.status?.phase !== "Bound" || pvc.spec?.volumeMode === "Block") {
     throw new Error("Persistent storage must be a bound, retained, filesystem PVC owned by this company/environment");

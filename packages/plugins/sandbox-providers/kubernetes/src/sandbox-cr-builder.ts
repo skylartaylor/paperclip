@@ -29,7 +29,7 @@ export interface BuildSandboxCrManifestInput {
     limits?: { cpu?: string; memory?: string };
   };
   expiresAt?: string;
-  persistentStorage?: { claimName: string; cacheKey: string };
+  persistentStorage?: { claimName: string; cacheKey: string; volumeIdentity: string };
   runtimeClassName?: string;
   imagePullSecrets?: string[];
 }
@@ -90,8 +90,8 @@ export function buildSandboxCrManifest(
           ...(input.persistentStorage ? {
             initContainers: [{
               name: "prepare-storage", image: input.image,
-              command: ["/bin/sh", "-ec", `mkdir -p /persist/workspace /persist/cargo/${input.persistentStorage.cacheKey}/home /persist/cargo/${input.persistentStorage.cacheKey}/target`],
-              volumeMounts: [{ name: "persistent", mountPath: "/persist" }],
+              command: ["/bin/sh", "-ec", `test "$(cat /persist/.paperclip-storage-id)" = "${input.persistentStorage.volumeIdentity}"; mkdir -p /persist/workspace /persist/cargo/${input.persistentStorage.cacheKey}/registry /persist/cargo/${input.persistentStorage.cacheKey}/git /persist/cargo/${input.persistentStorage.cacheKey}/target /home/paperclip/.cargo`],
+              volumeMounts: [{ name: "persistent", mountPath: "/persist" }, { name: "home", mountPath: "/home/paperclip" }],
               securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000,
                 readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } },
               resources: { requests: { cpu: "100m", memory: "128Mi", "ephemeral-storage": "32Mi" }, limits: { cpu: "100m", memory: "128Mi", "ephemeral-storage": "64Mi" } },
@@ -120,7 +120,7 @@ export function buildSandboxCrManifest(
                // and no output when HOME is unwritable, so set this explicitly.
               env: [{ name: "HOME", value: "/home/paperclip" },
                 ...(input.persistentStorage ? [
-                  { name: "CARGO_HOME", value: "/cargo/home" },
+                  { name: "CARGO_HOME", value: "/home/paperclip/.cargo" },
                   { name: "CARGO_TARGET_DIR", value: "/cargo/target" },
                 ] : []),
               ],
@@ -150,7 +150,9 @@ export function buildSandboxCrManifest(
               volumeMounts: [
                 ...(input.persistentStorage ? [
                   { name: "persistent", mountPath: "/workspace", subPath: "workspace" },
-                  { name: "persistent", mountPath: "/cargo", subPath: `cargo/${input.persistentStorage.cacheKey}` },
+                  { name: "persistent", mountPath: "/cargo/target", subPath: `cargo/${input.persistentStorage.cacheKey}/target` },
+                  { name: "persistent", mountPath: "/home/paperclip/.cargo/registry", subPath: `cargo/${input.persistentStorage.cacheKey}/registry` },
+                  { name: "persistent", mountPath: "/home/paperclip/.cargo/git", subPath: `cargo/${input.persistentStorage.cacheKey}/git` },
                 ] : [{ name: "workspace", mountPath: "/workspace" }]),
                 { name: "home", mountPath: "/home/paperclip" },
                 { name: "cache", mountPath: "/home/paperclip/.cache" },

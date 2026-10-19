@@ -31,6 +31,7 @@ export const kubernetesProviderConfigSchema = z
     persistentStorage: z.object({
       claimName: z.string().regex(/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/),
       cacheKey: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,62}$/),
+      volumeIdentity: z.string().uuid(),
     }).strict().optional(),
     resourceQuota: z.object({
       pods: z.string().regex(/^[1-9][0-9]*$/),

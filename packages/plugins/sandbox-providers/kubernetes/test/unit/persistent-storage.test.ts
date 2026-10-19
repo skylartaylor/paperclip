@@ -1,13 +1,17 @@
+import { mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { describe, it, expect, vi } from "vitest";
 import type { KubeClients } from "../../src/kube-client.js";
 import { acquirePersistentStorage, markPersistentStorageReleased } from "../../src/persistent-storage.js";
 import { buildSandboxCrManifest } from "../../src/sandbox-cr-builder.js";
 import { kubernetesProviderConfigSchema } from "../../src/types.js";
 
-const owner = { namespace: "paperclip-test", companyId: "company", environmentId: "env", claimName: "rust-work", workloadName: "pc-first" };
+const owner = { namespace: "paperclip-test", companyId: "company", environmentId: "env", claimName: "rust-work", volumeIdentity: "11111111-1111-4111-8111-111111111111", workloadName: "pc-first" };
 function fixture() {
   let lock: any = null;
-  const pvc: any = { metadata: { uid: "pvc-uid", labels: { "paperclip.io/managed-by": "paperclip-k8s-plugin", "paperclip.io/company-id": "company", "paperclip.io/environment-id": "env" } }, spec: { volumeName: "pv" }, status: { phase: "Bound" } };
+  const pvc: any = { metadata: { uid: "pvc-uid", annotations: { "paperclip.io/storage-identity": owner.volumeIdentity }, labels: { "paperclip.io/managed-by": "paperclip-k8s-plugin", "paperclip.io/company-id": "company", "paperclip.io/environment-id": "env" } }, spec: { volumeName: "pv" }, status: { phase: "Bound" } };
   const pv: any = { spec: { persistentVolumeReclaimPolicy: "Retain", claimRef: { namespace: owner.namespace, name: owner.claimName, uid: "pvc-uid" } } };
   const core = {
     readNamespacedPersistentVolumeClaim: vi.fn(async () => pvc), readPersistentVolume: vi.fn(async () => pv),
@@ -69,12 +73,15 @@ describe("persistent storage runtime contract", () => {
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
     const manifest: any = buildSandboxCrManifest({ namespace: owner.namespace, sandboxName: owner.workloadName,
       adapterType: "codex_local", image: "image@sha256:abc", envSecretName: "env", serviceAccountName: "sa", labels: {}, resources: {},
-      persistentStorage: { claimName: owner.claimName, cacheKey: "rust-1_92" }, expiresAt });
+      persistentStorage: { claimName: owner.claimName, cacheKey: "rust-1_92", volumeIdentity: owner.volumeIdentity }, expiresAt });
     const pod = manifest.spec.podTemplate.spec;
     expect(pod.volumes).toContainEqual({ name: "persistent", persistentVolumeClaim: { claimName: owner.claimName } });
     expect(pod.volumes).toContainEqual({ name: "home", emptyDir: { sizeLimit: "1Gi" } });
-    expect(pod.containers[0].volumeMounts).toContainEqual({ name: "persistent", mountPath: "/cargo", subPath: "cargo/rust-1_92" });
+    expect(pod.containers[0].volumeMounts).toContainEqual({ name: "persistent", mountPath: "/cargo/target", subPath: "cargo/rust-1_92/target" });
     expect(pod.containers[0].env).toContainEqual({ name: "CARGO_TARGET_DIR", value: "/cargo/target" });
+    expect(pod.containers[0].env).toContainEqual({ name: "CARGO_HOME", value: "/home/paperclip/.cargo" });
+    expect(pod.containers[0].volumeMounts).not.toContainEqual(expect.objectContaining({ name: "persistent", mountPath: "/home/paperclip/.cargo" }));
+    expect(pod.containers[0].volumeMounts).toContainEqual({ name: "persistent", mountPath: "/home/paperclip/.cargo/registry", subPath: "cargo/rust-1_92/registry" });
     expect(pod.initContainers[0].securityContext.runAsNonRoot).toBe(true);
     expect(manifest.spec.shutdownTime).toBe(expiresAt); expect(manifest.spec.shutdownPolicy).toBe("Delete");
     expect(pod.activeDeadlineSeconds).toBeLessThanOrEqual(60);
@@ -82,9 +89,34 @@ describe("persistent storage runtime contract", () => {
     expect(JSON.stringify(manifest)).not.toContain("hostPath");
   });
   it.each(["../escape", "a/b", "$(touch bad)", ""])("rejects unsafe cache key %s", cacheKey => {
-    expect(kubernetesProviderConfigSchema.safeParse({ inCluster: true, persistentStorage: { claimName: "work", cacheKey } }).success).toBe(false);
+    expect(kubernetesProviderConfigSchema.safeParse({ inCluster: true, persistentStorage: { claimName: "work", cacheKey, volumeIdentity: owner.volumeIdentity } }).success).toBe(false);
   });
   it("rejects persistent storage on one-shot jobs", () => {
-    expect(kubernetesProviderConfigSchema.safeParse({ inCluster: true, backend: "job", persistentStorage: { claimName: "work", cacheKey: "rust" } }).success).toBe(false);
+    expect(kubernetesProviderConfigSchema.safeParse({ inCluster: true, backend: "job", persistentStorage: { claimName: "work", cacheKey: "rust", volumeIdentity: owner.volumeIdentity } }).success).toBe(false);
+  });
+});
+
+
+describe("mount identity guard", () => {
+  it("rejects a PVC with a different storage identity", async () => {
+    const f = fixture(); f.pvc.metadata.annotations["paperclip.io/storage-identity"] = "different";
+    await expect(acquirePersistentStorage(f.clients, owner)).rejects.toThrow(/owned/);
+    expect(f.core.createNamespacedConfigMap).not.toHaveBeenCalled();
+  });
+  it("refuses an empty underlying directory before creating any workspace/cache", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pc-storage-"));
+    try {
+      const m: any = buildSandboxCrManifest({ namespace: "ns", sandboxName: "name", adapterType: "codex_local", image: "image", envSecretName: "env", serviceAccountName: "sa", labels: {}, resources: {}, persistentStorage: { claimName: owner.claimName, cacheKey: "rust", volumeIdentity: owner.volumeIdentity } });
+      const script = m.spec.podTemplate.spec.initContainers[0].command[2].replaceAll("/persist", dir).replaceAll("/home/paperclip", join(dir, "ephemeral-home"));
+      expect(spawnSync("/bin/sh", ["-ec", script]).status).not.toBe(0);
+      expect(existsSync(join(dir, "workspace"))).toBe(false);
+      expect(existsSync(join(dir, "cargo"))).toBe(false);
+      writeFileSync(join(dir, ".paperclip-storage-id"), "wrong");
+      expect(spawnSync("/bin/sh", ["-ec", script]).status).not.toBe(0);
+      expect(existsSync(join(dir, "workspace"))).toBe(false);
+      writeFileSync(join(dir, ".paperclip-storage-id"), owner.volumeIdentity);
+      expect(spawnSync("/bin/sh", ["-ec", script]).status).toBe(0);
+      expect(existsSync(join(dir, "cargo/rust/target"))).toBe(true);
+    } finally { rmSync(dir, { recursive: true }); }
   });
 });

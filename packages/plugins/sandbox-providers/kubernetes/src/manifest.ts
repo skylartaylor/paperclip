@@ -81,8 +81,9 @@ const manifest: PaperclipPluginManifestV1 = {
             properties: {
               claimName: { type: "string", pattern: "^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$" },
               cacheKey: { type: "string", pattern: "^[a-z0-9][a-z0-9_-]{0,62}$" },
-            }, required: ["claimName", "cacheKey"],
-            description: "Pre-provisioned company/environment-owned retained PVC. One writer; persists /workspace and /cargo across sandbox replacement. sandbox-cr only.",
+              volumeIdentity: { type: "string", format: "uuid" },
+            }, required: ["claimName", "cacheKey", "volumeIdentity"],
+            description: "Pre-provisioned company/environment-owned retained PVC. One writer; persists source, Cargo downloads and /cargo/target across sandbox replacement. sandbox-cr only.",
           },
           resourceQuota: {
             type: "object", additionalProperties: false,
