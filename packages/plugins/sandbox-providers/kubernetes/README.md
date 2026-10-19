@@ -233,3 +233,9 @@ realization and outside the workspace root. The optional streaming hooks remain
 workspace-confined and are not advertised for those leases. This compatibility
 choice trades transfer throughput for correct runtime staging without widening
 the streaming hooks' path permissions.
+
+The native `/workspace/.paperclip-runtime` staging root is a separate bounded
+ephemeral volume even with a retained workspace. This excludes managed account
+homes, runtime logs and staged run workspaces from the retained PVC. Paperclip
+stages source from its canonical host workspace; compiled Cargo targets and
+downloads retain their separate persistent mounts across replacement pods.

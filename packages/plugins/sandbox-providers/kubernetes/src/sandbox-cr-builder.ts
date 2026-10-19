@@ -90,7 +90,7 @@ export function buildSandboxCrManifest(
           ...(input.persistentStorage ? {
             initContainers: [{
               name: "prepare-storage", image: input.image,
-              command: ["/bin/sh", "-ec", `test "$(cat /persist/.paperclip-storage-id)" = "${input.persistentStorage.volumeIdentity}"; mkdir -p /persist/workspace /persist/cargo/${input.persistentStorage.cacheKey}/registry /persist/cargo/${input.persistentStorage.cacheKey}/git /persist/cargo/${input.persistentStorage.cacheKey}/target /home/paperclip/.cargo`],
+              command: ["/bin/sh", "-ec", `test "$(cat /persist/.paperclip-storage-id)" = "${input.persistentStorage.volumeIdentity}"; mkdir -p /persist/workspace/.paperclip-runtime /persist/cargo/${input.persistentStorage.cacheKey}/registry /persist/cargo/${input.persistentStorage.cacheKey}/git /persist/cargo/${input.persistentStorage.cacheKey}/target /home/paperclip/.cargo`],
               volumeMounts: [{ name: "persistent", mountPath: "/persist" }, { name: "home", mountPath: "/home/paperclip" }],
               securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000,
                 readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } },
@@ -150,6 +150,9 @@ export function buildSandboxCrManifest(
               volumeMounts: [
                 ...(input.persistentStorage ? [
                   { name: "persistent", mountPath: "/workspace", subPath: "workspace" },
+                  // Managed runtime homes contain account credentials. Keep the
+                  // entire native staging root off the retained workspace PVC.
+                  { name: "managed-runtime", mountPath: "/workspace/.paperclip-runtime" },
                   { name: "persistent", mountPath: "/cargo/target", subPath: `cargo/${input.persistentStorage.cacheKey}/target` },
                   { name: "persistent", mountPath: "/home/paperclip/.cargo/registry", subPath: `cargo/${input.persistentStorage.cacheKey}/registry` },
                   { name: "persistent", mountPath: "/home/paperclip/.cargo/git", subPath: `cargo/${input.persistentStorage.cacheKey}/git` },
@@ -162,7 +165,8 @@ export function buildSandboxCrManifest(
           ],
           volumes: [
             ...(input.persistentStorage
-              ? [{ name: "persistent", persistentVolumeClaim: { claimName: input.persistentStorage.claimName } }]
+              ? [{ name: "persistent", persistentVolumeClaim: { claimName: input.persistentStorage.claimName } },
+                 { name: "managed-runtime", emptyDir: { sizeLimit: "2Gi" } }]
               : [{ name: "workspace", emptyDir: { sizeLimit: "8Gi" } }]),
             { name: "home", emptyDir: { sizeLimit: "1Gi" } },
             { name: "cache", emptyDir: { sizeLimit: "1Gi" } },

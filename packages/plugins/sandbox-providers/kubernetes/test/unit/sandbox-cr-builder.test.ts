@@ -135,3 +135,21 @@ describe("buildSandboxCrManifest", () => {
     expect(cr.spec.podTemplate.spec.imagePullSecrets).toBeUndefined();
   });
 });
+
+// Runtime staging can contain managed auth even though HOME itself is ephemeral.
+it("mounts the native managed-runtime root outside the retained PVC", () => {
+  const cr = buildSandboxCrManifest({ ...baseInput, persistentStorage: {
+    claimName: "rust-workspace", cacheKey: "rust-v1",
+    volumeIdentity: "11111111-1111-4111-8111-111111111111",
+  } });
+  const spec = cr.spec.podTemplate.spec;
+  const mount = spec.containers[0].volumeMounts.find(
+    (entry: { mountPath: string }) => entry.mountPath === "/workspace/.paperclip-runtime",
+  );
+  expect(mount).toEqual({ name: "managed-runtime", mountPath: "/workspace/.paperclip-runtime" });
+  expect(spec.volumes.find((entry: { name: string }) => entry.name === mount.name))
+    .toEqual({ name: "managed-runtime", emptyDir: { sizeLimit: "2Gi" } });
+  expect(spec.containers[0].volumeMounts).toContainEqual({
+    name: "persistent", mountPath: "/cargo/target", subPath: "cargo/rust-v1/target",
+  });
+});
